@@ -33,22 +33,6 @@ Detects arithmetic operations that may cause integer overflow or underflow.
 ### Dangerous Delegatecall (SWC-112)
 Detects usage of `delegatecall` which can be dangerous if used with untrusted contracts.
 
-## Mythril Supplement (Research Dataset)
-
-To supplement the primary dataset with Mythril scans (as in your research methodology):
-
-1. **Install Mythril:** `py -m pip install mythril` (requires solc on PATH)
-2. **Copy and scan contracts:**
-   ```cmd
-   py mythril_scan.py contract_dataset_ethereum --output-dir mythril_scan_output --copy-staging
-   ```
-3. **Merge with primary dataset:**
-   ```cmd
-   py merge_mythril_dataset.py --primary standardized_dataset/standardized_dataset.json --mythril mythril_scan_output/mythril_scan_results.json -o combined_dataset.json
-   ```
-
-Mythril targets: Reentrancy, Integer overflow/underflow, Transaction-ordering dependence (front-running), Uninitialized storage pointers, Unchecked external calls. See `mythril_swc_mapping.json` for SWC mappings.
-
 ## Installation
 
 ```bash
@@ -56,6 +40,7 @@ pip install -r requirements.txt
 ```
 
 Note: Slither requires `solc` (Solidity compiler) to be installed. See [Slither documentation](https://github.com/crytic/slither) for installation instructions.
+If Slither is unavailable or fails on a contract, the pipeline can fall back to regex-based function extraction.
 
 ## Usage
 

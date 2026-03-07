@@ -5,9 +5,6 @@ test_output/
 # Local caches and generated outputs
 **/__pycache__/
 **/*.pyc
-Ethereum_smart_contract_datast/.mythril_docker_cache/
-Ethereum_smart_contract_datast/mythril_scan_output/
-Ethereum_smart_contract_datast/mythril_scan_output_test/
 Ethereum_smart_contract_datast/report_output/
 Ethereum_smart_contract_datast/vulnerability_report.txt
 
