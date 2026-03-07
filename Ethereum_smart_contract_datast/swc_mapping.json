@@ -1,0 +1,35 @@
+{
+  "SWC_MAPPING": {
+    "Reentrancy": {
+      "swc_id": "SWC-107",
+      "swc_name": "Reentrancy",
+      "description": "Reentrancy vulnerability allows external calls to re-enter the contract before state changes are completed"
+    },
+    "Timestamp Dependency": {
+      "swc_id": "SWC-116",
+      "swc_name": "Block Timestamp Dependence",
+      "description": "Block timestamp dependency can be manipulated by miners",
+      "labeling_rule": "TimestampInvoc ∧ (TimestampAssign ∨ TimestampContaminate)"
+    },
+    "Integer Overflow/Underflow": {
+      "swc_id": "SWC-101",
+      "swc_name": "Integer Overflow and Underflow",
+      "description": "Integer overflow/underflow in arithmetic operations (Note: Fixed in Solidity 0.8.0+)"
+    },
+    "Dangerous Delegatecall": {
+      "swc_id": "SWC-112",
+      "swc_name": "Delegatecall to Untrusted Contract",
+      "description": "Delegatecall to untrusted contract can lead to unexpected behavior"
+    }
+  },
+  "labeling_rules": {
+    "Timestamp Dependency": {
+      "rule": "TimestampInvoc ∧ (TimestampAssign ∨ TimestampContaminate)",
+      "components": {
+        "TimestampInvoc": "Function invokes timestamp-related variables (now, block.timestamp, block.number)",
+        "TimestampAssign": "Function assigns timestamp values to variables",
+        "TimestampContaminate": "Timestamp is used in conditional operations or logic"
+      }
+    }
+  }
+}

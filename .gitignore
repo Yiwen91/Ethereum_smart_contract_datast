@@ -1,0 +1,16 @@
+.DS_Store
+__MACOSX/
+test_output/
+
+# Local caches and generated outputs
+**/__pycache__/
+**/*.pyc
+Ethereum_smart_contract_datast/.mythril_docker_cache/
+Ethereum_smart_contract_datast/mythril_scan_output/
+Ethereum_smart_contract_datast/mythril_scan_output_test/
+Ethereum_smart_contract_datast/report_output/
+Ethereum_smart_contract_datast/vulnerability_report.txt
+
+# Large local datasets should not go into the code repo
+Ethereum_smart_contract_datast/contract_dataset_ethereum/
+Ethereum_smart_contract_datast/contract_dataset_github/

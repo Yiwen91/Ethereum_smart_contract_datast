@@ -1,0 +1,14 @@
+# Requirements for Standardized Dataset Processing
+
+# Slither for Solidity analysis
+slither-analyzer>=0.10.0
+
+# Mythril for research supplement (symbolic execution, Etherscan contracts)
+# Install: py -m pip install mythril
+# Note: Mythril requires solc; use py-solc-x or solc-select
+
+# Standard library dependencies (usually included with Python)
+# json, csv, re, pathlib, dataclasses, collections, argparse
+
+# Optional: for better performance
+# tqdm>=4.65.0  # Progress bars
