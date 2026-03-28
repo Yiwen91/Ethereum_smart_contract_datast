@@ -108,6 +108,64 @@ def test_delegatecall_labeling():
     return True
 
 
+def test_transaction_ordering_dependence_labeling():
+    """Competitive public state updates should get Transaction-Ordering Dependence."""
+    labeler = VulnerabilityLabeler()
+
+    code_tod = """
+    function bid() public payable {
+        require(msg.value > highestBid);
+        highestBid = msg.value;
+        winner = msg.sender;
+    }
+    """
+    vulns, labels = labeler.label_function(code_tod)
+    assert "Transaction-Ordering Dependence" in vulns, "Expected Transaction-Ordering Dependence"
+    assert labels.get("TransactionOrderingDependence") is True
+    return True
+
+
+def test_uninitialized_storage_pointer_labeling():
+    """Local storage pointer declarations should get Uninitialized Storage Pointer."""
+    labeler = VulnerabilityLabeler()
+
+    code_storage = """
+    struct Data { uint x; }
+    function f() public {
+        Data storage d;
+        d.x = 1;
+    }
+    """
+    vulns, labels = labeler.label_function(code_storage)
+    assert "Uninitialized Storage Pointer" in vulns, "Expected Uninitialized Storage Pointer"
+    assert labels.get("UninitializedStoragePointer") is True
+    return True
+
+
+def test_unchecked_external_calls_labeling():
+    """Unchecked low-level calls should get Unchecked External Calls."""
+    labeler = VulnerabilityLabeler()
+
+    code_unchecked = """
+    function ping(address target) public {
+        target.call("hello");
+    }
+    """
+    vulns, labels = labeler.label_function(code_unchecked)
+    assert "Unchecked External Calls" in vulns, "Expected Unchecked External Calls"
+    assert labels.get("UncheckedExternalCalls") is True
+
+    code_checked = """
+    function ping(address target) public {
+        bool ok = target.call("hello");
+        require(ok);
+    }
+    """
+    vulns2, _ = labeler.label_function(code_checked)
+    assert "Unchecked External Calls" not in vulns2, "Should not label checked external calls"
+    return True
+
+
 def test_swc_mapping():
     """Every vulnerability type should map to an SWC ID."""
     for vuln_name, info in SWC_MAPPING.items():
@@ -163,6 +221,9 @@ def run_all_tests():
         ("Reentrancy labeling", test_reentrancy_labeling),
         ("Integer overflow labeling", test_integer_overflow_labeling),
         ("Delegatecall labeling", test_delegatecall_labeling),
+        ("Transaction-ordering dependence labeling", test_transaction_ordering_dependence_labeling),
+        ("Uninitialized storage pointer labeling", test_uninitialized_storage_pointer_labeling),
+        ("Unchecked external calls labeling", test_unchecked_external_calls_labeling),
         ("SWC mapping", test_swc_mapping),
         ("Process file yields labels", test_process_file_yields_labels),
     ]

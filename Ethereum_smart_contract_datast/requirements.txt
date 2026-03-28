@@ -3,6 +3,11 @@
 # Slither for Solidity analysis
 slither-analyzer>=0.10.0
 
+# Experiment pipeline
+scikit-learn
+ijson
+transformers
+
 # Standard library dependencies (usually included with Python)
 # json, csv, re, pathlib, dataclasses, collections, argparse
 

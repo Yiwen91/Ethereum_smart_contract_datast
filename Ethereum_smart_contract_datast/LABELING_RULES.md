@@ -10,6 +10,9 @@ This document describes the exact labeling rules applied to functions extracted 
 | Timestamp Dependency | SWC-116 | Block Timestamp Dependence |
 | Integer Overflow/Underflow | SWC-101 | Integer Overflow and Underflow |
 | Dangerous Delegatecall | SWC-112 | Delegatecall to Untrusted Contract |
+| Transaction-Ordering Dependence | SWC-114 | Transaction-Ordering Dependence |
+| Uninitialized Storage Pointer | SWC-109 | Uninitialized Storage Pointer |
+| Unchecked External Calls | SWC-104 | Unchecked Call Return Value |
 
 ## Labeling Rules
 
@@ -160,6 +163,68 @@ function executeDelegatecall(address target, bytes memory data) public {
 **Label**: `Delegatecall = true`
 **Vulnerability**: **Dangerous Delegatecall** (SWC-112)
 
+### 5. Transaction-Ordering Dependence (SWC-114)
+
+**Rule**: Public/external function manipulates shared order-sensitive state and uses competitive logic or value flow.
+
+A function is labeled as having **Transaction-Ordering Dependence** if:
+- It is `public` or `external`
+- It reads or writes shared order-sensitive variables such as `highestBid`, `price`, `order`, `orders`, `winner`, `pending`, `balances`, `allowance`
+- It also contains comparisons (`>`, `<`, `>=`, `<=`, `==`, `!=`) or value flow such as `msg.value`, `transfer`, `send`, `call`, `approve`, `transferFrom`
+
+#### Example:
+
+```solidity
+function bid() public payable {
+    require(msg.value > highestBid);
+    highestBid = msg.value;
+    winner = msg.sender;
+}
+```
+
+**Label**: `TransactionOrderingDependence = true`
+**Vulnerability**: **Transaction-Ordering Dependence** (SWC-114)
+
+### 6. Uninitialized Storage Pointer (SWC-109)
+
+**Rule**: Function declares a local `storage` pointer without initialization.
+
+A function is labeled as having **Uninitialized Storage Pointer** if:
+- It contains a local declaration like `Type storage name;`
+- The declaration appears inside the function body, not in the function signature
+
+#### Example:
+
+```solidity
+function update() public {
+    Data storage d;
+    d.x = 1;
+}
+```
+
+**Label**: `UninitializedStoragePointer = true`
+**Vulnerability**: **Uninitialized Storage Pointer** (SWC-109)
+
+### 7. Unchecked External Calls (SWC-104)
+
+**Rule**: Function makes a low-level external call and ignores the boolean result.
+
+A function is labeled as having **Unchecked External Calls** if:
+- It contains `.call(`, `.send(`, `.delegatecall(`, or `.callcode(`
+- The result is not wrapped directly in `require`, `assert`, or `if`
+- The result is not assigned to a variable on that line
+
+#### Example:
+
+```solidity
+function ping(address target) public {
+    target.call("hello");
+}
+```
+
+**Label**: `UncheckedExternalCalls = true`
+**Vulnerability**: **Unchecked External Calls** (SWC-104)
+
 ## Output Format
 
 ### Function Data Structure
@@ -185,7 +250,10 @@ Each extracted function includes:
         "TimestampContaminate": true,
         "Reentrancy": true,
         "IntegerOverflow": false,
-        "Delegatecall": false
+        "Delegatecall": false,
+        "TransactionOrderingDependence": false,
+        "UninitializedStoragePointer": false,
+        "UncheckedExternalCalls": false
     },
     "metadata": {}
 }

@@ -7,7 +7,10 @@ test_output/
 **/*.pyc
 Ethereum_smart_contract_datast/report_output/
 Ethereum_smart_contract_datast/vulnerability_report.txt
+Ethereum_smart_contract_datast/standardized_smartbugs/
+Ethereum_smart_contract_datast/smartbugs_vulnerability_report.txt
 
 # Large local datasets should not go into the code repo
 Ethereum_smart_contract_datast/contract_dataset_ethereum/
 Ethereum_smart_contract_datast/contract_dataset_github/
+Ethereum_smart_contract_datast/smartbugs_wild/

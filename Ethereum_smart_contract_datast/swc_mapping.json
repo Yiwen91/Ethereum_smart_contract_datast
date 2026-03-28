@@ -20,6 +20,21 @@
       "swc_id": "SWC-112",
       "swc_name": "Delegatecall to Untrusted Contract",
       "description": "Delegatecall to untrusted contract can lead to unexpected behavior"
+    },
+    "Transaction-Ordering Dependence": {
+      "swc_id": "SWC-114",
+      "swc_name": "Transaction-Ordering Dependence",
+      "description": "Transaction ordering can change contract outcomes and enable front-running"
+    },
+    "Uninitialized Storage Pointer": {
+      "swc_id": "SWC-109",
+      "swc_name": "Uninitialized Storage Pointer",
+      "description": "Uninitialized local storage pointers can alias unexpected storage slots"
+    },
+    "Unchecked External Calls": {
+      "swc_id": "SWC-104",
+      "swc_name": "Unchecked Call Return Value",
+      "description": "Low-level external call results are ignored instead of being checked"
     }
   },
   "labeling_rules": {
@@ -29,6 +44,26 @@
         "TimestampInvoc": "Function invokes timestamp-related variables (now, block.timestamp, block.number)",
         "TimestampAssign": "Function assigns timestamp values to variables",
         "TimestampContaminate": "Timestamp is used in conditional operations or logic"
+      }
+    },
+    "Transaction-Ordering Dependence": {
+      "rule": "Public/external function manipulates shared order-sensitive state and uses competitive logic or value flow",
+      "components": {
+        "shared_state": "Variables such as bids, price, orders, balances, allowance, winner, nonce, or pending state are read/written",
+        "competitive_logic": "Comparisons or value transfers suggest outcomes may depend on transaction ordering"
+      }
+    },
+    "Uninitialized Storage Pointer": {
+      "rule": "Local storage variable is declared without initialization",
+      "components": {
+        "storage_pointer": "Pattern like `Type storage name;` appears inside the function body"
+      }
+    },
+    "Unchecked External Calls": {
+      "rule": "Low-level external call is made and its return value is not checked",
+      "components": {
+        "low_level_call": "Pattern like `.call(...)`, `.send(...)`, `.delegatecall(...)`, or `.callcode(...)`",
+        "unchecked_result": "The result is not wrapped in require/assert/if and is not assigned to a boolean"
       }
     }
   }

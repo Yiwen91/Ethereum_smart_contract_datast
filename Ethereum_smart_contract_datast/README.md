@@ -14,6 +14,9 @@ This tool standardizes Ethereum smart contract datasets by:
 | Timestamp Dependency | SWC-116 | Block Timestamp Dependence |
 | Integer Overflow/Underflow | SWC-101 | Integer Overflow and Underflow |
 | Dangerous Delegatecall | SWC-112 | Delegatecall to Untrusted Contract |
+| Transaction-Ordering Dependence | SWC-114 | Transaction-Ordering Dependence |
+| Uninitialized Storage Pointer | SWC-109 | Uninitialized Storage Pointer |
+| Unchecked External Calls | SWC-104 | Unchecked Call Return Value |
 
 ## Labeling Rules
 
@@ -33,6 +36,15 @@ Detects arithmetic operations that may cause integer overflow or underflow.
 ### Dangerous Delegatecall (SWC-112)
 Detects usage of `delegatecall` which can be dangerous if used with untrusted contracts.
 
+### Transaction-Ordering Dependence (SWC-114)
+Detects public or external functions that update shared order-sensitive state and use competitive logic or value flow that may be front-run.
+
+### Uninitialized Storage Pointer (SWC-109)
+Detects local storage variables declared without initialization, which can alias unintended storage slots in older Solidity versions.
+
+### Unchecked External Calls (SWC-104)
+Detects low-level external calls such as `.call()` and `.send()` when their return values are ignored.
+
 ## Installation
 
 ```bash
@@ -50,6 +62,163 @@ If Slither is unavailable or fails on a contract, the pipeline can fall back to 
 python standardize_dataset.py <input_directory> --output-dir standardized_dataset --format both
 ```
 
+## Dataset Workflows
+
+This project now supports two dataset roles:
+
+- **Primary dataset**: Messi-Q-derived processed Ethereum dataset stored in `contract_dataset_ethereum` (ESC)
+- **Secondary dataset**: SmartBugs Wild raw contracts stored in `smartbugs_wild/contracts`
+
+### Quick Comparison
+
+| Dataset | Folder | Role | Best helper |
+|--------------|--------|------|-------------|
+| Dataset 1: Ethereum smart contract | `contract_dataset_ethereum` | Primary processed dataset | `run_dataset1_ethereum.bat` |
+| Dataset 2: SmartBugs Wild | `smartbugs_wild/contracts` | Secondary raw dataset | `run_dataset2_smartbugs.bat` |
+
+### Primary Dataset: Ethereum Smart Contracts (ESC)
+
+The primary dataset is:
+
+- `contract_dataset_ethereum`
+
+Run the main ESC pipeline:
+
+```cmd
+py standardize_dataset.py contract_dataset_ethereum --output-dir standardized_dataset --format both
+py report_vulnerability_counts.py contract_dataset_ethereum -o vulnerability_report.txt
+```
+
+Or use the dataset-specific helper:
+
+```cmd
+run_dataset1_ethereum.bat
+```
+
+Inspect one ESC contract:
+
+```cmd
+inspect_dataset1_contract.bat contract_dataset_ethereum\contract1\0.sol
+```
+
+Create balanced experiment splits from the labeled ESC JSON:
+
+```cmd
+py prepare_experiment_splits.py --from-json standardized_dataset\standardized_dataset.json --output-dir experiment_splits\esc_primary
+```
+
+This creates contract-level `train`, `val`, and `test` splits while balancing the 7 configured vulnerability types as evenly as possible across the splits.
+
+Train the first ESC tabular baseline on those split files:
+
+```cmd
+py train_experiment.py --model tabular --split-dir experiment_splits\esc_primary --output-dir experiments\tabular_baseline
+```
+
+The baseline uses:
+
+- function-level multilabel targets
+- TF-IDF features from `function_code`
+- one-vs-rest logistic regression
+- validation-tuned per-label thresholds
+
+By default, the training script uses sample limits for a faster first run:
+
+- `--max-train-samples 100000`
+- `--max-val-samples 20000`
+- `--max-test-samples 20000`
+
+Outputs are saved under the chosen experiment folder and include:
+
+- `run_config.json`
+- `thresholds.json`
+- `val_metrics.json`
+- `test_metrics.json`
+- `summary.txt`
+- `val_predictions.jsonl`
+- `test_predictions.jsonl`
+
+Train a `CodeBERT` semantic baseline on the same ESC split files:
+
+```cmd
+py train_experiment.py --model codebert --split-dir experiment_splits\esc_primary --output-dir experiments\codebert_baseline --run-name codebert_smoke_test --max-train-samples 1000 --max-val-samples 200 --max-test-samples 200 --sample-strategy head --epochs 1 --train-batch-size 4 --eval-batch-size 8 --max-length 256
+```
+
+The `CodeBERT` baseline uses:
+
+- the same function-level multilabel targets
+- the same train / val / test split files
+- the same threshold tuning and metrics as the tabular baseline
+- `microsoft/codebert-base` as the default pretrained model
+
+Useful `CodeBERT` options:
+
+- `--codebert-model-name` to switch pretrained checkpoints
+- `--epochs` to control fine-tuning length
+- `--train-batch-size` and `--eval-batch-size` for memory control
+- `--max-length` to cap tokenized function length
+- `--device cpu` or `--device cuda` to force device choice
+- `--save-model` to store the fine-tuned model and tokenizer in the run folder
+
+### Secondary Dataset: SmartBugs Wild
+
+Import the raw SmartBugs Wild contracts into this repo:
+
+```cmd
+py import_smartbugs_wild.py --include-metadata
+```
+
+This places the secondary dataset under:
+
+- `smartbugs_wild/contracts`
+
+Run the full secondary-dataset pipeline:
+
+```cmd
+py standardize_dataset.py smartbugs_wild\contracts --output-dir standardized_smartbugs --format both --fallback-only --no-validate --no-dedup
+py report_vulnerability_counts.py --from-json standardized_smartbugs\standardized_dataset.json -o smartbugs_vulnerability_report.txt
+```
+
+Or use the helper batch file:
+
+```cmd
+run_dataset2_smartbugs.bat
+```
+
+Inspect one SmartBugs contract:
+
+```cmd
+inspect_dataset2_smartbugs_contract.bat smartbugs_wild\contracts\<contract>.sol
+```
+
+`smartbugs-wild` is already published as a curated benchmark dataset with duplicates removed, so the secondary workflow skips validation and dedup for the full run to reduce runtime while preserving the source dataset layout.
+
+### Side-By-Side Commands
+
+Run full dataset 1:
+
+```cmd
+run_dataset1_ethereum.bat
+```
+
+Run full dataset 2:
+
+```cmd
+run_dataset2_smartbugs.bat
+```
+
+Inspect one dataset 1 contract:
+
+```cmd
+inspect_dataset1_contract.bat contract_dataset_ethereum\contract1\0.sol
+```
+
+Inspect one dataset 2 contract:
+
+```cmd
+inspect_dataset2_smartbugs_contract.bat smartbugs_wild\contracts\<contract>.sol
+```
+
 ### Arguments
 
 - `input_dir`: Directory containing `.sol` files (required)
@@ -65,6 +234,9 @@ python standardize_dataset.py <input_directory> --output-dir standardized_datase
 ```bash
 # Process all contracts in contract_dataset_ethereum
 python standardize_dataset.py Ethereum_smart_contract_datast/contract_dataset_ethereum
+
+# Process SmartBugs Wild as the secondary dataset
+python standardize_dataset.py Ethereum_smart_contract_datast/smartbugs_wild/contracts --output-dir standardized_smartbugs --format both --fallback-only --no-validate --no-dedup
 
 # Export only JSON format
 python standardize_dataset.py Ethereum_smart_contract_datast/contract_dataset_ethereum --format json
@@ -116,6 +288,7 @@ The CSV includes columns:
 - `vulnerabilities` (semicolon-separated)
 - `swc_ids` (semicolon-separated)
 - `has_reentrancy`, `has_timestamp_dependency`, `has_integer_overflow`, `has_delegatecall`
+- `has_tod`, `has_uninitialized_storage_pointer`, `has_unchecked_external_calls`
 - `timestamp_invoc`, `timestamp_assign`, `timestamp_contaminate`
 
 ## Function Extraction
@@ -140,6 +313,9 @@ The labeling system applies pattern matching and heuristics to detect vulnerabil
 2. **Reentrancy**: Identifies external calls that may be vulnerable
 3. **Integer Overflow**: Detects arithmetic operations on integers
 4. **Delegatecall**: Finds delegatecall usage
+5. **Transaction-Ordering Dependence**: Looks for shared order-sensitive state updates in public/external functions
+6. **Uninitialized Storage Pointer**: Finds local storage declarations without initialization
+7. **Unchecked External Calls**: Flags low-level calls whose boolean results are ignored
 
 Note: These are heuristic-based detections. For production use, consider integrating with more sophisticated static analysis tools.
 
@@ -193,12 +369,15 @@ The test file `test_labeling.py` checks that:
 - **Reentrancy**: code with `.transfer()` / `.call()` gets *Reentrancy* (SWC-107).
 - **Integer overflow**: code with `++` / `+=` gets *Integer Overflow/Underflow* (SWC-101).
 - **Delegatecall**: code with `.delegatecall()` gets *Dangerous Delegatecall* (SWC-112).
+- **Transaction ordering dependence**: code with bidding/order-sensitive shared state gets *Transaction-Ordering Dependence* (SWC-114).
+- **Storage pointers**: uninitialized local `storage` declarations get *Uninitialized Storage Pointer* (SWC-109).
+- **Unchecked external calls**: ignored low-level `.call()` / `.send()` results get *Unchecked External Calls* (SWC-104).
 - **SWC mapping**: every vulnerability type has a valid SWC ID.
 - **Integration**: processing a real `.sol` file returns `FunctionData` with `vulnerabilities`, `swc_ids`, and `labels` populated.
 
 ## Count valid contracts and vulnerabilities
 
-To see **how many valid contracts** you have and **how many have each vulnerability** (and how many have all four):
+To see **how many valid contracts** you have and **how many have each vulnerability** (and how many have all configured vulnerability types):
 
 **From a directory of `.sol` files** (validates and deduplicates, then counts):
 
@@ -232,12 +411,65 @@ Vulnerability counts (valid contracts)
     Timestamp Dependency          contracts:    67  functions:  112  (SWC-116)
     Integer Overflow/Underflow    contracts:   101  functions:  456  (SWC-101)
     Dangerous Delegatecall        contracts:    12  functions:   14  (SWC-112)
+    Transaction-Ordering Dependence contracts:   23  functions:   41  (SWC-114)
+    Uninitialized Storage Pointer contracts:     8  functions:    9  (SWC-109)
+    Unchecked External Calls      contracts:    31  functions:   57  (SWC-104)
   --------------------------------------------------
-  Contracts with ALL 4 vulnerabilities:  3
+  Contracts with ALL 7 vulnerabilities:  1
 ============================================================
 ```
 
-So you get: total valid contracts, total functions, per-vulnerability contract/function counts, and how many contracts have all four vulnerability types.
+So you get: total valid contracts, total functions, per-vulnerability contract/function counts, and how many contracts have all configured vulnerability types.
+
+## Empirical Limitation Checks
+
+Use `evaluate_limitations.py` to generate code-based evidence for common tooling and labeling limitations.
+
+### 1. Solidity 0.8+ overflow false-positive candidates
+
+This checks how many contracts with `pragma >=0.8.0` are still labeled for integer overflow, and how many of those do not contain an `unchecked` block.
+
+```cmd
+py evaluate_limitations.py overflow-08 --from-json standardized_dataset\standardized_dataset.json
+```
+
+### 2. Reentrancy over-labeling with guards
+
+This checks how many contracts/functions labeled as reentrant also contain `nonReentrant` or `ReentrancyGuard`.
+
+```cmd
+py evaluate_limitations.py reentrancy-guards --from-json standardized_dataset\standardized_dataset.json
+```
+
+### 3. Clean-contract count
+
+This reports how many valid contracts have zero vulnerability labels.
+
+```cmd
+py evaluate_limitations.py clean-contracts --from-json standardized_dataset\standardized_dataset.json
+```
+
+### 4. Combined summary
+
+Run all JSON-based limitation checks together:
+
+```cmd
+py evaluate_limitations.py summary --from-json standardized_dataset\standardized_dataset.json -o limitation_summary.txt
+```
+
+### 5. Scalability benchmark
+
+Benchmark the current pipeline on increasing subset sizes:
+
+```cmd
+py evaluate_limitations.py benchmark contract_dataset_ethereum --sizes 100 500 1000 --fallback-only
+```
+
+You can also benchmark SmartBugs Wild:
+
+```cmd
+py evaluate_limitations.py benchmark smartbugs_wild\contracts --sizes 100 500 1000 --fallback-only --no-validate --no-dedup
+```
 
 ## Running full validation
 

@@ -54,6 +54,18 @@ SWC_MAPPING = {
     "Dangerous Delegatecall": {
         "swc_id": "SWC-112",
         "swc_name": "Delegatecall to Untrusted Contract"
+    },
+    "Transaction-Ordering Dependence": {
+        "swc_id": "SWC-114",
+        "swc_name": "Transaction-Ordering Dependence"
+    },
+    "Uninitialized Storage Pointer": {
+        "swc_id": "SWC-109",
+        "swc_name": "Uninitialized Storage Pointer"
+    },
+    "Unchecked External Calls": {
+        "swc_id": "SWC-104",
+        "swc_name": "Unchecked Call Return Value"
     }
 }
 
@@ -137,6 +149,18 @@ class VulnerabilityLabeler:
             r'\.delegatecall\s*\(',
             r'delegatecall\s*\('
         ]
+
+        # Patterns for order-dependent shared state and bidding-like operations
+        self.tod_state_patterns = [
+            r'\b(highestBid|highestbid|bid|bids|auction|price|nonce|order|orders|winner|pending)\b',
+            r'\b(balanceOf|allowance|balances?)\b',
+            r'\[(.*?)\]\s*=',
+        ]
+
+        # Patterns for unchecked low-level calls
+        self.unchecked_external_call_patterns = [
+            r'(?P<expr>[^;\n]*\.(?:call|send|delegatecall|callcode)\s*\([^;\n]*\))\s*;',
+        ]
     
     def detect_timestamp_dependency(self, code: str) -> Dict[str, bool]:
         """
@@ -217,6 +241,60 @@ class VulnerabilityLabeler:
             if re.search(pattern, code, re.IGNORECASE):
                 return True
         return False
+
+    def detect_transaction_ordering_dependence(self, code: str) -> bool:
+        """
+        Detects likely transaction-ordering dependence / front-running patterns.
+        Heuristic: public/external function touches shared order-sensitive state and
+        also performs a comparison/update that can be influenced by transaction ordering.
+        """
+        declaration = code[: code.find('{')] if '{' in code else code
+        if not re.search(r'\b(public|external)\b', declaration, re.IGNORECASE):
+            return False
+
+        has_order_state = any(re.search(pattern, code, re.IGNORECASE) for pattern in self.tod_state_patterns)
+        if not has_order_state:
+            return False
+
+        has_competitive_logic = bool(re.search(r'(>=|<=|>|<|==|!=)', code))
+        has_value_flow = bool(
+            re.search(r'\b(msg\.value|transfer\s*\(|send\s*\(|call\s*\(|approve\s*\(|transferFrom\s*\()', code, re.IGNORECASE)
+        )
+        has_state_write = bool(re.search(r'(\w+\s*[\+\-*/]?=|\[[^\]]+\]\s*=)', code))
+        return has_state_write and (has_competitive_logic or has_value_flow)
+
+    def detect_uninitialized_storage_pointer(self, code: str) -> bool:
+        """
+        Detects uninitialized local storage pointers such as:
+        `uint[] storage s;` or `MyStruct storage data;`
+        """
+        declaration = code[: code.find('{')] if '{' in code else code
+        body = code[code.find('{') + 1 :] if '{' in code else ""
+        if re.search(r'\b(storage)\b', declaration, re.IGNORECASE):
+            return False
+        pattern = r'\b(?:mapping\s*\([^;]+?\)|[A-Za-z_]\w*(?:\[\])*)\s+storage\s+[A-Za-z_]\w*\s*;'
+        return bool(re.search(pattern, body, re.IGNORECASE))
+
+    def detect_unchecked_external_calls(self, code: str) -> bool:
+        """
+        Detects low-level external calls whose boolean result is not checked.
+        """
+        for pattern in self.unchecked_external_call_patterns:
+            for match in re.finditer(pattern, code, re.IGNORECASE):
+                line_start = code.rfind('\n', 0, match.start()) + 1
+                line_end = code.find('\n', match.end())
+                if line_end == -1:
+                    line_end = len(code)
+                line = code[line_start:line_end].strip()
+
+                if re.search(r'\b(require|assert|if)\b', line, re.IGNORECASE):
+                    continue
+                if re.search(r'=\s*[^;]*\.(?:call|send|delegatecall|callcode)\s*\(', line, re.IGNORECASE):
+                    continue
+                if re.search(r'\(\s*bool\s+\w+', line, re.IGNORECASE):
+                    continue
+                return True
+        return False
     
     def label_function(
         self,
@@ -253,6 +331,21 @@ class VulnerabilityLabeler:
         if self.detect_delegatecall(code):
             vulnerabilities.append("Dangerous Delegatecall")
             detailed_labels['Delegatecall'] = True
+
+        # Transaction-Ordering Dependence
+        if self.detect_transaction_ordering_dependence(code):
+            vulnerabilities.append("Transaction-Ordering Dependence")
+            detailed_labels['TransactionOrderingDependence'] = True
+
+        # Uninitialized Storage Pointer
+        if self.detect_uninitialized_storage_pointer(code):
+            vulnerabilities.append("Uninitialized Storage Pointer")
+            detailed_labels['UninitializedStoragePointer'] = True
+
+        # Unchecked External Calls
+        if self.detect_unchecked_external_calls(code):
+            vulnerabilities.append("Unchecked External Calls")
+            detailed_labels['UncheckedExternalCalls'] = True
         
         return vulnerabilities, detailed_labels
 
@@ -260,8 +353,9 @@ class VulnerabilityLabeler:
 class SlitherExtractor:
     """Extracts function information using Slither"""
     
-    def __init__(self, solc_version: Optional[str] = None):
+    def __init__(self, solc_version: Optional[str] = None, fallback_only: bool = False):
         self.solc_version = solc_version
+        self.fallback_only = fallback_only
     
     def extract_functions(self, sol_file: str) -> List[Dict]:
         """
@@ -269,6 +363,9 @@ class SlitherExtractor:
         Returns list of function dictionaries
         """
         functions = []
+
+        if self.fallback_only:
+            return self._fallback_extract(sol_file)
         
         try:
             # Try to use Slither API
@@ -435,12 +532,17 @@ class SlitherExtractor:
 class DatasetStandardizer:
     """Main class for standardizing dataset formats"""
     
-    def __init__(self, output_dir: str = "standardized_dataset", swc_mapping: Optional[Dict] = None):
+    def __init__(
+        self,
+        output_dir: str = "standardized_dataset",
+        swc_mapping: Optional[Dict] = None,
+        fallback_only: bool = False,
+    ):
         self.output_dir = Path(output_dir)
         self.output_dir.mkdir(exist_ok=True)
         
         self.swc_mapping = swc_mapping or load_swc_mapping()
-        self.extractor = SlitherExtractor()
+        self.extractor = SlitherExtractor(fallback_only=fallback_only)
         self.labeler = VulnerabilityLabeler()
         
         self.all_functions: List[FunctionData] = []
@@ -569,7 +671,8 @@ class DatasetStandardizer:
             'contract_file', 'contract_name', 'function_name', 'function_signature',
             'start_line', 'end_line', 'visibility', 'state_mutability',
             'vulnerabilities', 'swc_ids', 'has_reentrancy', 'has_timestamp_dependency',
-            'has_integer_overflow', 'has_delegatecall',
+            'has_integer_overflow', 'has_delegatecall', 'has_tod',
+            'has_uninitialized_storage_pointer', 'has_unchecked_external_calls',
             'timestamp_invoc', 'timestamp_assign', 'timestamp_contaminate'
         ]
         
@@ -593,6 +696,9 @@ class DatasetStandardizer:
                     'has_timestamp_dependency': 'Timestamp Dependency' in func.vulnerabilities,
                     'has_integer_overflow': 'Integer Overflow/Underflow' in func.vulnerabilities,
                     'has_delegatecall': 'Dangerous Delegatecall' in func.vulnerabilities,
+                    'has_tod': 'Transaction-Ordering Dependence' in func.vulnerabilities,
+                    'has_uninitialized_storage_pointer': 'Uninitialized Storage Pointer' in func.vulnerabilities,
+                    'has_unchecked_external_calls': 'Unchecked External Calls' in func.vulnerabilities,
                     'timestamp_invoc': func.labels.get('TimestampInvoc', False),
                     'timestamp_assign': func.labels.get('TimestampAssign', False),
                     'timestamp_contaminate': func.labels.get('TimestampContaminate', False)
@@ -649,11 +755,19 @@ def main():
         default=50,
         help='Minimum file length in chars for validation (default: 50)'
     )
+    parser.add_argument(
+        '--fallback-only',
+        action='store_true',
+        help='Skip Slither and use regex-based function extraction only'
+    )
     
     args = parser.parse_args()
     
     # Create standardizer
-    standardizer = DatasetStandardizer(output_dir=args.output_dir)
+    standardizer = DatasetStandardizer(
+        output_dir=args.output_dir,
+        fallback_only=args.fallback_only,
+    )
     
     # Process directory
     print(f"Processing directory: {args.input_dir}")
