@@ -120,28 +120,42 @@ def choose_thresholds(
     y_prob: np.ndarray,
     label_order: list[str] | None = None,
     candidate_thresholds: list[float] | None = None,
+    default_threshold: float = 0.5,
+    min_support: int = 5,
+    min_precision: float = 0.15,
 ) -> dict[str, float]:
     label_order = label_order or list(VULN_TYPES)
-    candidate_thresholds = candidate_thresholds or [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7]
+    candidate_thresholds = candidate_thresholds or [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9]
     thresholds: dict[str, float] = {}
 
     for idx, label in enumerate(label_order):
-        best_threshold = 0.5
+        support = int(y_true[:, idx].sum())
+        if support < min_support:
+            thresholds[label] = default_threshold
+            continue
+
+        best_threshold = default_threshold
         best_f1 = -1.0
+        constrained_threshold = None
+        constrained_f1 = -1.0
         y_true_col = y_true[:, idx]
         y_prob_col = y_prob[:, idx]
         for threshold in candidate_thresholds:
             y_pred_col = (y_prob_col >= threshold).astype(int)
-            _, _, f1, _ = precision_recall_fscore_support(
+            precision, _, f1, _ = precision_recall_fscore_support(
                 y_true_col,
                 y_pred_col,
                 average="binary",
                 zero_division=0,
             )
+            predicted_positive = int(y_pred_col.sum())
             if f1 > best_f1:
                 best_f1 = f1
                 best_threshold = threshold
-        thresholds[label] = best_threshold
+            if predicted_positive > 0 and precision >= min_precision and f1 > constrained_f1:
+                constrained_f1 = f1
+                constrained_threshold = threshold
+        thresholds[label] = constrained_threshold if constrained_threshold is not None else best_threshold
 
     return thresholds
 

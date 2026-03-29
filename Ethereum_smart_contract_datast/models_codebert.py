@@ -47,6 +47,8 @@ class CodeBERTMultilabelBaseline:
         learning_rate: float = 2e-5,
         weight_decay: float = 0.01,
         epochs: int = 2,
+        max_pos_weight: float = 8.0,
+        grad_clip_norm: float = 1.0,
         device: str | None = None,
         seed: int = 42,
     ):
@@ -57,6 +59,8 @@ class CodeBERTMultilabelBaseline:
         self.learning_rate = learning_rate
         self.weight_decay = weight_decay
         self.epochs = epochs
+        self.max_pos_weight = max_pos_weight
+        self.grad_clip_norm = grad_clip_norm
         self.seed = seed
         self.device = torch.device(device or ("cuda" if torch.cuda.is_available() else "cpu"))
         self.tokenizer = AutoTokenizer.from_pretrained(model_name)
@@ -90,13 +94,13 @@ class CodeBERTMultilabelBaseline:
         encoded["labels"] = torch.tensor(labels, dtype=torch.float32)
         return encoded
 
-    @staticmethod
-    def _compute_pos_weight(labels: np.ndarray) -> torch.Tensor:
+    def _compute_pos_weight(self, labels: np.ndarray) -> torch.Tensor:
         positives = labels.sum(axis=0)
         negatives = labels.shape[0] - positives
         weights = np.ones_like(positives, dtype=np.float32)
         mask = positives > 0
-        weights[mask] = negatives[mask] / positives[mask]
+        weights[mask] = np.sqrt(negatives[mask] / positives[mask])
+        weights = np.clip(weights, 1.0, self.max_pos_weight)
         return torch.tensor(weights, dtype=torch.float32)
 
     def fit(
@@ -118,6 +122,7 @@ class CodeBERTMultilabelBaseline:
         pos_weight = self._compute_pos_weight(train_labels).to(self.device)
         loss_fn = nn.BCEWithLogitsLoss(pos_weight=pos_weight)
         optimizer = AdamW(self.model.parameters(), lr=self.learning_rate, weight_decay=self.weight_decay)
+        print(f"[train] Using capped sqrt pos_weight: {pos_weight.detach().cpu().tolist()}")
 
         val_loader = None
         if val_texts is not None and val_labels is not None and len(val_texts) > 0:
@@ -144,6 +149,8 @@ class CodeBERTMultilabelBaseline:
                 outputs = self.model(**batch)
                 loss = loss_fn(outputs.logits, labels)
                 loss.backward()
+                if self.grad_clip_norm and self.grad_clip_norm > 0:
+                    torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.grad_clip_norm)
                 optimizer.step()
 
                 batch_size = labels.size(0)

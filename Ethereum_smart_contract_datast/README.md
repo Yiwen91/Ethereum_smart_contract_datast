@@ -159,6 +159,15 @@ Useful `CodeBERT` options:
 - `--max-length` to cap tokenized function length
 - `--device cpu` or `--device cuda` to force device choice
 - `--save-model` to store the fine-tuned model and tokenizer in the run folder
+- `--max-pos-weight` to cap rare-label positive weighting during BCE training
+- `--grad-clip-norm` to stabilize transformer fine-tuning
+- `--default-threshold`, `--threshold-min-support`, and `--threshold-min-precision` to keep threshold tuning from collapsing to overly low values on rare labels
+
+A safer larger `CodeBERT` command for Colab GPU is:
+
+```cmd
+python train_experiment.py --model codebert --split-dir experiment_splits/esc_primary --output-dir experiments/codebert_baseline --run-name esc_codebert_tuned --max-train-samples 10000 --max-val-samples 1500 --max-test-samples 1500 --sample-strategy reservoir --epochs 3 --train-batch-size 8 --eval-batch-size 8 --max-length 128 --learning-rate 2e-5 --max-pos-weight 8 --grad-clip-norm 1.0 --default-threshold 0.5 --threshold-min-support 5 --threshold-min-precision 0.15
+```
 
 ### Secondary Dataset: SmartBugs Wild
 

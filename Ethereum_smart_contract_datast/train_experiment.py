@@ -102,8 +102,17 @@ def _config_from_args(args) -> dict:
                 "epochs": args.epochs,
                 "device": args.device,
                 "save_model": args.save_model,
+                "max_pos_weight": args.max_pos_weight,
+                "grad_clip_norm": args.grad_clip_norm,
             }
         )
+    config.update(
+        {
+            "default_threshold": args.default_threshold,
+            "threshold_min_support": args.threshold_min_support,
+            "threshold_min_precision": args.threshold_min_precision,
+        }
+    )
     return config
 
 
@@ -189,7 +198,14 @@ def run_tabular_experiment(args) -> Path:
 
     print("[eval] Selecting per-label thresholds on validation split...")
     val_prob = model.predict_proba(val_split.texts)
-    thresholds = choose_thresholds(val_split.labels, val_prob, label_order=VULN_TYPES)
+    thresholds = choose_thresholds(
+        val_split.labels,
+        val_prob,
+        label_order=VULN_TYPES,
+        default_threshold=args.default_threshold,
+        min_support=args.threshold_min_support,
+        min_precision=args.threshold_min_precision,
+    )
     val_pred = apply_thresholds(val_prob, thresholds, label_order=VULN_TYPES)
     val_metrics = compute_multilabel_metrics(val_split.labels, val_pred, label_order=VULN_TYPES)
 
@@ -229,6 +245,8 @@ def run_codebert_experiment(args) -> Path:
         learning_rate=args.learning_rate,
         weight_decay=args.weight_decay,
         epochs=args.epochs,
+        max_pos_weight=args.max_pos_weight,
+        grad_clip_norm=args.grad_clip_norm,
         device=args.device,
         seed=args.seed,
     )
@@ -241,7 +259,14 @@ def run_codebert_experiment(args) -> Path:
 
     print("[eval] Selecting per-label thresholds on validation split...")
     val_prob = model.predict_proba(val_split.texts)
-    thresholds = choose_thresholds(val_split.labels, val_prob, label_order=VULN_TYPES)
+    thresholds = choose_thresholds(
+        val_split.labels,
+        val_prob,
+        label_order=VULN_TYPES,
+        default_threshold=args.default_threshold,
+        min_support=args.threshold_min_support,
+        min_precision=args.threshold_min_precision,
+    )
     val_pred = apply_thresholds(val_prob, thresholds, label_order=VULN_TYPES)
     val_metrics = compute_multilabel_metrics(val_split.labels, val_pred, label_order=VULN_TYPES)
 
@@ -311,6 +336,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--learning-rate", type=float, default=2e-5)
     parser.add_argument("--weight-decay", type=float, default=0.01)
     parser.add_argument("--epochs", type=int, default=2)
+    parser.add_argument("--max-pos-weight", type=float, default=8.0)
+    parser.add_argument("--grad-clip-norm", type=float, default=1.0)
     parser.add_argument("--device", help="Optional torch device override, e.g. cpu or cuda")
     parser.add_argument(
         "--save-model",
@@ -323,6 +350,9 @@ def build_parser() -> argparse.ArgumentParser:
         default="reservoir",
         help="How to sample examples when max sample limits are set.",
     )
+    parser.add_argument("--default-threshold", type=float, default=0.5)
+    parser.add_argument("--threshold-min-support", type=int, default=5)
+    parser.add_argument("--threshold-min-precision", type=float, default=0.15)
     return parser
 
 
