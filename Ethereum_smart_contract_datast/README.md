@@ -138,6 +138,25 @@ Outputs are saved under the chosen experiment folder and include:
 - `val_predictions.jsonl`
 - `test_predictions.jsonl`
 
+The experiment reports now include:
+
+- micro precision / recall / F1
+- macro precision / recall / F1
+- weighted precision / recall / F1
+- subset accuracy
+- per-label precision / recall / F1
+
+Run multiple seeds and aggregate mean/std for stronger academic reporting:
+
+```cmd
+py train_experiment.py --model tabular --split-dir experiment_splits\esc_primary --output-dir experiments\tabular_baseline --run-name esc_tabular_multiseed --max-train-samples 50000 --max-val-samples 10000 --max-test-samples 10000 --sample-strategy reservoir --seeds 42 43 44
+```
+
+This writes per-seed run folders plus an aggregate folder containing:
+
+- `aggregate_metrics.json`
+- `aggregate_summary.txt`
+
 Train a `CodeBERT` semantic baseline on the same ESC split files:
 
 ```cmd
@@ -167,6 +186,12 @@ A safer larger `CodeBERT` command for Colab GPU is:
 
 ```cmd
 python train_experiment.py --model codebert --split-dir experiment_splits/esc_primary --output-dir experiments/codebert_baseline --run-name esc_codebert_tuned --max-train-samples 10000 --max-val-samples 1500 --max-test-samples 1500 --sample-strategy reservoir --epochs 3 --train-batch-size 8 --eval-batch-size 8 --max-length 128 --learning-rate 2e-5 --max-pos-weight 8 --grad-clip-norm 1.0 --default-threshold 0.5 --threshold-min-support 5 --threshold-min-precision 0.15
+```
+
+Run multiple tuned `CodeBERT` seeds and report mean/std:
+
+```cmd
+python train_experiment.py --model codebert --codebert-model-name hf_models/hf_models/codebert-base --split-dir experiment_splits/esc_primary --output-dir experiments/codebert_baseline --run-name esc_codebert_multiseed --max-train-samples 10000 --max-val-samples 1500 --max-test-samples 1500 --sample-strategy reservoir --epochs 3 --train-batch-size 8 --eval-batch-size 8 --max-length 128 --learning-rate 2e-5 --max-pos-weight 8 --grad-clip-norm 1.0 --default-threshold 0.5 --threshold-min-support 5 --threshold-min-precision 0.15 --seeds 42 43 44
 ```
 
 ### Secondary Dataset: SmartBugs Wild

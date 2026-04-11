@@ -188,6 +188,12 @@ def compute_multilabel_metrics(
         average="macro",
         zero_division=0,
     )
+    weighted_p, weighted_r, weighted_f1, _ = precision_recall_fscore_support(
+        y_true,
+        y_pred,
+        average="weighted",
+        zero_division=0,
+    )
     per_label_p, per_label_r, per_label_f1, per_label_support = precision_recall_fscore_support(
         y_true,
         y_pred,
@@ -214,6 +220,9 @@ def compute_multilabel_metrics(
         "macro_precision": float(macro_p),
         "macro_recall": float(macro_r),
         "macro_f1": float(macro_f1),
+        "weighted_precision": float(weighted_p),
+        "weighted_recall": float(weighted_r),
+        "weighted_f1": float(weighted_f1),
         "subset_accuracy": exact_match,
         "per_label": per_label,
     }
@@ -230,6 +239,9 @@ def metrics_to_text(name: str, metrics: dict, thresholds: dict[str, float] | Non
         f"Macro Precision: {metrics['macro_precision']:.4f}",
         f"Macro Recall:    {metrics['macro_recall']:.4f}",
         f"Macro F1:        {metrics['macro_f1']:.4f}",
+        f"Weighted Precision: {metrics['weighted_precision']:.4f}",
+        f"Weighted Recall:    {metrics['weighted_recall']:.4f}",
+        f"Weighted F1:        {metrics['weighted_f1']:.4f}",
         f"Subset Accuracy: {metrics['subset_accuracy']:.4f}",
         "",
         "Per-label metrics",

@@ -6,8 +6,11 @@ Train and evaluate experiment baselines on ESC split JSON files.
 from __future__ import annotations
 
 import argparse
+import copy
 from datetime import datetime
 from pathlib import Path
+
+import numpy as np
 
 from experiment_utils import (
     VULN_TYPES,
@@ -180,6 +183,12 @@ def _save_run_outputs(
     )
     (run_dir / "summary.txt").write_text(summary, encoding="utf-8")
     print(summary)
+    return {
+        "run_dir": str(run_dir),
+        "val_metrics": val_metrics,
+        "test_metrics": test_metrics,
+        "thresholds": thresholds,
+    }
 
 
 def run_tabular_experiment(args) -> Path:
@@ -214,7 +223,7 @@ def run_tabular_experiment(args) -> Path:
     test_pred = apply_thresholds(test_prob, thresholds, label_order=VULN_TYPES)
     test_metrics = compute_multilabel_metrics(test_split.labels, test_pred, label_order=VULN_TYPES)
 
-    _save_run_outputs(
+    result = _save_run_outputs(
         run_dir=run_dir,
         summary_title="ESC Tabular Baseline Summary",
         train_split=train_split,
@@ -229,7 +238,7 @@ def run_tabular_experiment(args) -> Path:
         thresholds=thresholds,
         config=_config_from_args(args),
     )
-    return run_dir
+    return result
 
 
 def run_codebert_experiment(args) -> Path:
@@ -278,7 +287,7 @@ def run_codebert_experiment(args) -> Path:
     if args.save_model:
         model.save_model(str(run_dir / "model"))
 
-    _save_run_outputs(
+    result = _save_run_outputs(
         run_dir=run_dir,
         summary_title="ESC CodeBERT Baseline Summary",
         train_split=train_split,
@@ -293,7 +302,129 @@ def run_codebert_experiment(args) -> Path:
         thresholds=thresholds,
         config=_config_from_args(args),
     )
-    return run_dir
+    return result
+
+
+def _aggregate_metric_group(metric_dicts: list[dict]) -> dict:
+    scalar_keys = [
+        "micro_precision",
+        "micro_recall",
+        "micro_f1",
+        "macro_precision",
+        "macro_recall",
+        "macro_f1",
+        "weighted_precision",
+        "weighted_recall",
+        "weighted_f1",
+        "subset_accuracy",
+    ]
+    aggregated = {
+        "runs": len(metric_dicts),
+        "samples_per_run": [metrics["samples"] for metrics in metric_dicts],
+        "scalars": {},
+        "per_label": {},
+    }
+    for key in scalar_keys:
+        values = np.asarray([metrics[key] for metrics in metric_dicts], dtype=np.float64)
+        aggregated["scalars"][key] = {
+            "mean": float(values.mean()),
+            "std": float(values.std(ddof=0)),
+        }
+
+    for label in VULN_TYPES:
+        label_f1 = np.asarray([metrics["per_label"][label]["f1"] for metrics in metric_dicts], dtype=np.float64)
+        label_precision = np.asarray([metrics["per_label"][label]["precision"] for metrics in metric_dicts], dtype=np.float64)
+        label_recall = np.asarray([metrics["per_label"][label]["recall"] for metrics in metric_dicts], dtype=np.float64)
+        label_support = np.asarray([metrics["per_label"][label]["support"] for metrics in metric_dicts], dtype=np.float64)
+        aggregated["per_label"][label] = {
+            "precision_mean": float(label_precision.mean()),
+            "precision_std": float(label_precision.std(ddof=0)),
+            "recall_mean": float(label_recall.mean()),
+            "recall_std": float(label_recall.std(ddof=0)),
+            "f1_mean": float(label_f1.mean()),
+            "f1_std": float(label_f1.std(ddof=0)),
+            "support_mean": float(label_support.mean()),
+        }
+    return aggregated
+
+
+def _format_aggregate_summary(model_name: str, seeds: list[int], val_agg: dict, test_agg: dict) -> str:
+    def _section(title: str, aggregate: dict) -> list[str]:
+        lines = [
+            title,
+            "=" * 72,
+        ]
+        for key, stats in aggregate["scalars"].items():
+            lines.append(f"{key}: mean={stats['mean']:.4f} std={stats['std']:.4f}")
+        lines.extend([
+            "",
+            "Per-label F1 mean/std",
+            "-" * 72,
+        ])
+        for label in VULN_TYPES:
+            item = aggregate["per_label"][label]
+            lines.append(
+                f"{label:30} F1={item['f1_mean']:.4f}+/-{item['f1_std']:.4f} "
+                f"P={item['precision_mean']:.4f}+/-{item['precision_std']:.4f} "
+                f"R={item['recall_mean']:.4f}+/-{item['recall_std']:.4f}"
+            )
+        return lines
+
+    lines = [
+        f"ESC {model_name} Multi-Seed Summary",
+        "=" * 72,
+        f"Seeds: {', '.join(str(seed) for seed in seeds)}",
+        "",
+    ]
+    lines.extend(_section("Validation Aggregate", val_agg))
+    lines.append("")
+    lines.extend(_section("Test Aggregate", test_agg))
+    return "\n".join(lines) + "\n"
+
+
+def run_multi_seed_experiments(args):
+    seeds = args.seeds if args.seeds else [args.seed]
+    base_run_name = args.run_name or f"{args.model}_{_timestamp()}_multiseed"
+    run_results = []
+
+    for seed in seeds:
+        seed_args = copy.deepcopy(args)
+        seed_args.seed = seed
+        seed_args.run_name = f"{base_run_name}_seed{seed}"
+        print(f"[multi-seed] Starting seed {seed}...")
+        if seed_args.model == "tabular":
+            result = run_tabular_experiment(seed_args)
+        elif seed_args.model == "codebert":
+            result = run_codebert_experiment(seed_args)
+        else:
+            raise ValueError(f"Unsupported model: {seed_args.model}")
+        run_results.append(
+            {
+                "seed": seed,
+                "run_dir": result["run_dir"],
+                "val_metrics": result["val_metrics"],
+                "test_metrics": result["test_metrics"],
+            }
+        )
+
+    val_agg = _aggregate_metric_group([result["val_metrics"] for result in run_results])
+    test_agg = _aggregate_metric_group([result["test_metrics"] for result in run_results])
+
+    aggregate_dir = Path(args.output_dir) / f"{base_run_name}_aggregate"
+    aggregate_dir.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "model": args.model,
+        "seeds": seeds,
+        "runs": run_results,
+        "validation": val_agg,
+        "test": test_agg,
+        "config_template": _config_from_args(args),
+    }
+    save_json(aggregate_dir / "aggregate_metrics.json", payload)
+    summary = _format_aggregate_summary(args.model.upper(), seeds, val_agg, test_agg)
+    (aggregate_dir / "aggregate_summary.txt").write_text(summary, encoding="utf-8")
+    print(summary)
+    return aggregate_dir
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -321,6 +452,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="Optional fixed run folder name.",
     )
     parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument(
+        "--seeds",
+        nargs="+",
+        type=int,
+        help="Optional list of seeds for repeated runs and mean/std aggregation.",
+    )
     parser.add_argument("--max-train-samples", type=int, default=100000)
     parser.add_argument("--max-val-samples", type=int, default=20000)
     parser.add_argument("--max-test-samples", type=int, default=20000)
@@ -364,6 +501,11 @@ def main():
             if args.model == "codebert"
             else "experiments/tabular_baseline"
         )
+    if args.seeds and len(args.seeds) > 1:
+        run_multi_seed_experiments(args)
+        return
+    if args.seeds and len(args.seeds) == 1:
+        args.seed = args.seeds[0]
     if args.model == "tabular":
         run_tabular_experiment(args)
         return
