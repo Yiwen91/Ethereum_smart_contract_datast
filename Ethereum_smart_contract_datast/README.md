@@ -196,6 +196,37 @@ Run multiple tuned `CodeBERT` seeds and report mean/std:
 python train_experiment.py --model codebert --codebert-model-name hf_models/hf_models/codebert-base --split-dir experiment_splits/esc_primary --output-dir experiments/codebert_baseline --run-name esc_codebert_multiseed --max-train-samples 10000 --max-val-samples 1500 --max-test-samples 1500 --sample-strategy reservoir --epochs 3 --train-batch-size 8 --eval-batch-size 8 --max-length 128 --learning-rate 2e-5 --max-pos-weight 8 --grad-clip-norm 1.0 --default-threshold 0.5 --threshold-min-support 5 --threshold-min-precision 0.15 --seeds 42 43 44
 ```
 
+Train an `AST/CFG GNN` structural baseline on the same ESC split files:
+
+```cmd
+py train_experiment.py --model gnn --split-dir experiment_splits\esc_primary --output-dir experiments\gnn_baseline --run-name gnn_smoke_test --max-train-samples 5000 --max-val-samples 1000 --max-test-samples 1000 --sample-strategy reservoir --gnn-epochs 3 --gnn-max-nodes 48 --gnn-feature-dim 256 --gnn-hidden-dim 128 --gnn-num-layers 2 --gnn-train-batch-size 64 --gnn-eval-batch-size 128
+```
+
+The `GNN` baseline uses:
+
+- the same function-level multilabel targets
+- the same train / val / test split files
+- Solidity AST nodes extracted from `solc`
+- CFG nodes extracted from `Slither`
+- a fused AST/CFG function graph with cross-edges by source-line overlap
+- hashed node features extracted from node types and code snippets
+- the same threshold tuning and saved metrics as the other baselines
+
+Useful `GNN` options:
+
+- `--gnn-max-nodes` to cap fused AST/CFG graph size per function
+- `--gnn-feature-dim` to control hashed node feature width
+- `--gnn-hidden-dim` and `--gnn-num-layers` to scale model capacity
+- `--gnn-train-batch-size` and `--gnn-eval-batch-size` for memory control
+- `--gnn-learning-rate`, `--gnn-weight-decay`, and `--gnn-epochs` for tuning
+- `--gnn-max-pos-weight` and `--gnn-grad-clip-norm` for imbalance and optimization stability
+
+A safer larger `AST/CFG GNN` command for Colab is:
+
+```cmd
+python train_experiment.py --model gnn --split-dir experiment_splits/esc_primary --output-dir experiments/gnn_baseline --run-name esc_gnn_tuned_100k --max-train-samples 100000 --max-val-samples 10000 --max-test-samples 10000 --sample-strategy reservoir --gnn-epochs 3 --gnn-max-nodes 48 --gnn-feature-dim 256 --gnn-hidden-dim 128 --gnn-num-layers 2 --gnn-dropout 0.2 --gnn-train-batch-size 64 --gnn-eval-batch-size 128 --gnn-learning-rate 1e-3 --gnn-weight-decay 1e-4 --gnn-max-pos-weight 8 --gnn-grad-clip-norm 1.0 --default-threshold 0.5 --threshold-min-support 5 --threshold-min-precision 0.15
+```
+
 ### Secondary Dataset: SmartBugs Wild
 
 Import the raw SmartBugs Wild contracts into this repo:

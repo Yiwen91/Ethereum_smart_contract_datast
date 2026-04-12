@@ -25,6 +25,7 @@ from experiment_utils import (
     save_predictions_jsonl,
 )
 from models_codebert import CodeBERTMultilabelBaseline
+from models_gnn import ASTCFGFunctionGNNMultilabelBaseline
 from models_tabular import TabularMultilabelBaseline
 
 
@@ -108,6 +109,24 @@ def _config_from_args(args) -> dict:
                 "save_model": args.save_model,
                 "max_pos_weight": args.max_pos_weight,
                 "grad_clip_norm": args.grad_clip_norm,
+            }
+        )
+    elif args.model == "gnn":
+        config.update(
+            {
+                "gnn_max_nodes": args.gnn_max_nodes,
+                "gnn_feature_dim": args.gnn_feature_dim,
+                "gnn_hidden_dim": args.gnn_hidden_dim,
+                "gnn_num_layers": args.gnn_num_layers,
+                "gnn_dropout": args.gnn_dropout,
+                "gnn_train_batch_size": args.gnn_train_batch_size,
+                "gnn_eval_batch_size": args.gnn_eval_batch_size,
+                "gnn_learning_rate": args.gnn_learning_rate,
+                "gnn_weight_decay": args.gnn_weight_decay,
+                "gnn_epochs": args.gnn_epochs,
+                "gnn_max_pos_weight": args.gnn_max_pos_weight,
+                "gnn_grad_clip_norm": args.gnn_grad_clip_norm,
+                "device": args.device,
             }
         )
     config.update(
@@ -338,6 +357,86 @@ def run_codebert_experiment(args) -> Path:
     return result
 
 
+def run_gnn_experiment(args) -> Path:
+    run_dir = _ensure_run_dir(args.output_dir, args.run_name)
+    train_split, val_split, test_split = _load_splits(args)
+
+    print("[train] Training AST/CFG GNN baseline...")
+    model = ASTCFGFunctionGNNMultilabelBaseline(
+        max_nodes=args.gnn_max_nodes,
+        feature_dim=args.gnn_feature_dim,
+        hidden_dim=args.gnn_hidden_dim,
+        num_layers=args.gnn_num_layers,
+        dropout=args.gnn_dropout,
+        train_batch_size=args.gnn_train_batch_size,
+        eval_batch_size=args.gnn_eval_batch_size,
+        learning_rate=args.gnn_learning_rate,
+        weight_decay=args.gnn_weight_decay,
+        epochs=args.gnn_epochs,
+        max_pos_weight=args.gnn_max_pos_weight,
+        grad_clip_norm=args.gnn_grad_clip_norm,
+        device=args.device,
+        seed=args.seed,
+    )
+    model.fit(
+        train_split.records,
+        train_split.labels,
+        val_records=val_split.records,
+        val_labels=val_split.labels,
+    )
+
+    print("[eval] Selecting per-label thresholds on validation split...")
+    val_start = perf_counter()
+    val_prob = model.predict_proba(val_split.records)
+    val_inference_seconds = perf_counter() - val_start
+    thresholds = choose_thresholds(
+        val_split.labels,
+        val_prob,
+        label_order=VULN_TYPES,
+        default_threshold=args.default_threshold,
+        min_support=args.threshold_min_support,
+        min_precision=args.threshold_min_precision,
+    )
+    val_pred = apply_thresholds(val_prob, thresholds, label_order=VULN_TYPES)
+    val_metrics = compute_multilabel_metrics(
+        val_split.labels,
+        val_pred,
+        y_prob=val_prob,
+        label_order=VULN_TYPES,
+        inference_seconds=val_inference_seconds,
+    )
+
+    print("[eval] Evaluating on test split...")
+    test_start = perf_counter()
+    test_prob = model.predict_proba(test_split.records)
+    test_inference_seconds = perf_counter() - test_start
+    test_pred = apply_thresholds(test_prob, thresholds, label_order=VULN_TYPES)
+    test_metrics = compute_multilabel_metrics(
+        test_split.labels,
+        test_pred,
+        y_prob=test_prob,
+        label_order=VULN_TYPES,
+        inference_seconds=test_inference_seconds,
+    )
+
+    result = _save_run_outputs(
+        run_dir=run_dir,
+        summary_title="ESC GNN Baseline Summary",
+        train_split=train_split,
+        val_split=val_split,
+        test_split=test_split,
+        val_prob=val_prob,
+        val_pred=val_pred,
+        val_metrics=val_metrics,
+        test_prob=test_prob,
+        test_pred=test_pred,
+        test_metrics=test_metrics,
+        thresholds=thresholds,
+        config=_config_from_args(args),
+    )
+    return result
+
+
 def _aggregate_metric_group(metric_dicts: list[dict]) -> dict:
     scalar_keys = [
         "micro_precision",
@@ -469,6 +568,8 @@ def run_multi_seed_experiments(args):
             result = run_tabular_experiment(seed_args)
         elif seed_args.model == "codebert":
             result = run_codebert_experiment(seed_args)
+        elif seed_args.model == "gnn":
+            result = run_gnn_experiment(seed_args)
         else:
             raise ValueError(f"Unsupported model: {seed_args.model}")
         run_results.append(
@@ -506,7 +607,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--model",
-        choices=["tabular", "codebert"],
+        choices=["tabular", "codebert", "gnn"],
         default="tabular",
         help="Which baseline to run.",
     )
@@ -563,6 +664,18 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--default-threshold", type=float, default=0.5)
     parser.add_argument("--threshold-min-support", type=int, default=5)
     parser.add_argument("--threshold-min-precision", type=float, default=0.15)
+    parser.add_argument("--gnn-max-nodes", type=int, default=48)
+    parser.add_argument("--gnn-feature-dim", type=int, default=256)
+    parser.add_argument("--gnn-hidden-dim", type=int, default=128)
+    parser.add_argument("--gnn-num-layers", type=int, default=2)
+    parser.add_argument("--gnn-dropout", type=float, default=0.2)
+    parser.add_argument("--gnn-train-batch-size", type=int, default=64)
+    parser.add_argument("--gnn-eval-batch-size", type=int, default=128)
+    parser.add_argument("--gnn-learning-rate", type=float, default=1e-3)
+    parser.add_argument("--gnn-weight-decay", type=float, default=1e-4)
+    parser.add_argument("--gnn-epochs", type=int, default=3)
+    parser.add_argument("--gnn-max-pos-weight", type=float, default=8.0)
+    parser.add_argument("--gnn-grad-clip-norm", type=float, default=1.0)
     return parser
 
 
@@ -572,6 +685,8 @@ def main():
         args.output_dir = (
             "experiments/codebert_baseline"
             if args.model == "codebert"
+            else "experiments/gnn_baseline"
+            if args.model == "gnn"
             else "experiments/tabular_baseline"
         )
     if args.seeds and len(args.seeds) > 1:
@@ -584,6 +699,9 @@ def main():
         return
     if args.model == "codebert":
         run_codebert_experiment(args)
+        return
+    if args.model == "gnn":
+        run_gnn_experiment(args)
         return
     raise ValueError(f"Unsupported model: {args.model}")
 
