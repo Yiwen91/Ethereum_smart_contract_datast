@@ -9,6 +9,7 @@ import argparse
 import copy
 from datetime import datetime
 from pathlib import Path
+from time import perf_counter
 
 import numpy as np
 
@@ -206,7 +207,9 @@ def run_tabular_experiment(args) -> Path:
     model.fit(train_split.texts, train_split.labels)
 
     print("[eval] Selecting per-label thresholds on validation split...")
+    val_start = perf_counter()
     val_prob = model.predict_proba(val_split.texts)
+    val_inference_seconds = perf_counter() - val_start
     thresholds = choose_thresholds(
         val_split.labels,
         val_prob,
@@ -216,12 +219,26 @@ def run_tabular_experiment(args) -> Path:
         min_precision=args.threshold_min_precision,
     )
     val_pred = apply_thresholds(val_prob, thresholds, label_order=VULN_TYPES)
-    val_metrics = compute_multilabel_metrics(val_split.labels, val_pred, label_order=VULN_TYPES)
+    val_metrics = compute_multilabel_metrics(
+        val_split.labels,
+        val_pred,
+        y_prob=val_prob,
+        label_order=VULN_TYPES,
+        inference_seconds=val_inference_seconds,
+    )
 
     print("[eval] Evaluating on test split...")
+    test_start = perf_counter()
     test_prob = model.predict_proba(test_split.texts)
+    test_inference_seconds = perf_counter() - test_start
     test_pred = apply_thresholds(test_prob, thresholds, label_order=VULN_TYPES)
-    test_metrics = compute_multilabel_metrics(test_split.labels, test_pred, label_order=VULN_TYPES)
+    test_metrics = compute_multilabel_metrics(
+        test_split.labels,
+        test_pred,
+        y_prob=test_prob,
+        label_order=VULN_TYPES,
+        inference_seconds=test_inference_seconds,
+    )
 
     result = _save_run_outputs(
         run_dir=run_dir,
@@ -267,7 +284,9 @@ def run_codebert_experiment(args) -> Path:
     )
 
     print("[eval] Selecting per-label thresholds on validation split...")
+    val_start = perf_counter()
     val_prob = model.predict_proba(val_split.texts)
+    val_inference_seconds = perf_counter() - val_start
     thresholds = choose_thresholds(
         val_split.labels,
         val_prob,
@@ -277,12 +296,26 @@ def run_codebert_experiment(args) -> Path:
         min_precision=args.threshold_min_precision,
     )
     val_pred = apply_thresholds(val_prob, thresholds, label_order=VULN_TYPES)
-    val_metrics = compute_multilabel_metrics(val_split.labels, val_pred, label_order=VULN_TYPES)
+    val_metrics = compute_multilabel_metrics(
+        val_split.labels,
+        val_pred,
+        y_prob=val_prob,
+        label_order=VULN_TYPES,
+        inference_seconds=val_inference_seconds,
+    )
 
     print("[eval] Evaluating on test split...")
+    test_start = perf_counter()
     test_prob = model.predict_proba(test_split.texts)
+    test_inference_seconds = perf_counter() - test_start
     test_pred = apply_thresholds(test_prob, thresholds, label_order=VULN_TYPES)
-    test_metrics = compute_multilabel_metrics(test_split.labels, test_pred, label_order=VULN_TYPES)
+    test_metrics = compute_multilabel_metrics(
+        test_split.labels,
+        test_pred,
+        y_prob=test_prob,
+        label_order=VULN_TYPES,
+        inference_seconds=test_inference_seconds,
+    )
 
     if args.save_model:
         model.save_model(str(run_dir / "model"))
@@ -316,7 +349,12 @@ def _aggregate_metric_group(metric_dicts: list[dict]) -> dict:
         "weighted_precision",
         "weighted_recall",
         "weighted_f1",
+        "micro_auc_roc",
+        "macro_auc_roc",
+        "weighted_auc_roc",
         "subset_accuracy",
+        "inference_latency_seconds",
+        "inference_latency_ms_per_sample",
     ]
     aggregated = {
         "runs": len(metric_dicts),
@@ -325,48 +363,83 @@ def _aggregate_metric_group(metric_dicts: list[dict]) -> dict:
         "per_label": {},
     }
     for key in scalar_keys:
-        values = np.asarray([metrics[key] for metrics in metric_dicts], dtype=np.float64)
+        values = np.asarray(
+            [metrics[key] for metrics in metric_dicts if metrics[key] is not None],
+            dtype=np.float64,
+        )
+        if values.size == 0:
+            aggregated["scalars"][key] = {
+                "mean": None,
+                "std": None,
+            }
+            continue
         aggregated["scalars"][key] = {
             "mean": float(values.mean()),
             "std": float(values.std(ddof=0)),
         }
 
     for label in VULN_TYPES:
+        label_accuracy = np.asarray(
+            [metrics["per_label"][label]["accuracy"] for metrics in metric_dicts],
+            dtype=np.float64,
+        )
         label_f1 = np.asarray([metrics["per_label"][label]["f1"] for metrics in metric_dicts], dtype=np.float64)
         label_precision = np.asarray([metrics["per_label"][label]["precision"] for metrics in metric_dicts], dtype=np.float64)
         label_recall = np.asarray([metrics["per_label"][label]["recall"] for metrics in metric_dicts], dtype=np.float64)
         label_support = np.asarray([metrics["per_label"][label]["support"] for metrics in metric_dicts], dtype=np.float64)
+        auc_values = [
+            metrics["per_label"][label]["auc_roc"]
+            for metrics in metric_dicts
+            if metrics["per_label"][label]["auc_roc"] is not None
+        ]
+        label_auc_mean = None
+        label_auc_std = None
+        if auc_values:
+            label_auc = np.asarray(auc_values, dtype=np.float64)
+            label_auc_mean = float(label_auc.mean())
+            label_auc_std = float(label_auc.std(ddof=0))
         aggregated["per_label"][label] = {
+            "accuracy_mean": float(label_accuracy.mean()),
+            "accuracy_std": float(label_accuracy.std(ddof=0)),
             "precision_mean": float(label_precision.mean()),
             "precision_std": float(label_precision.std(ddof=0)),
             "recall_mean": float(label_recall.mean()),
             "recall_std": float(label_recall.std(ddof=0)),
             "f1_mean": float(label_f1.mean()),
             "f1_std": float(label_f1.std(ddof=0)),
+            "auc_roc_mean": label_auc_mean,
+            "auc_roc_std": label_auc_std,
             "support_mean": float(label_support.mean()),
         }
     return aggregated
 
 
 def _format_aggregate_summary(model_name: str, seeds: list[int], val_agg: dict, test_agg: dict) -> str:
+    def _format_optional(value) -> str:
+        return "n/a" if value is None else f"{value:.4f}"
+
     def _section(title: str, aggregate: dict) -> list[str]:
         lines = [
             title,
             "=" * 72,
         ]
         for key, stats in aggregate["scalars"].items():
-            lines.append(f"{key}: mean={stats['mean']:.4f} std={stats['std']:.4f}")
+            lines.append(
+                f"{key}: mean={_format_optional(stats['mean'])} std={_format_optional(stats['std'])}"
+            )
         lines.extend([
             "",
-            "Per-label F1 mean/std",
+            "Per-label metrics mean/std",
             "-" * 72,
         ])
         for label in VULN_TYPES:
             item = aggregate["per_label"][label]
             lines.append(
-                f"{label:30} F1={item['f1_mean']:.4f}+/-{item['f1_std']:.4f} "
+                f"{label:30} Acc={item['accuracy_mean']:.4f}+/-{item['accuracy_std']:.4f} "
+                f"F1={item['f1_mean']:.4f}+/-{item['f1_std']:.4f} "
                 f"P={item['precision_mean']:.4f}+/-{item['precision_std']:.4f} "
-                f"R={item['recall_mean']:.4f}+/-{item['recall_std']:.4f}"
+                f"R={item['recall_mean']:.4f}+/-{item['recall_std']:.4f} "
+                f"AUC={_format_optional(item['auc_roc_mean'])}+/-{_format_optional(item['auc_roc_std'])}"
             )
         return lines
 

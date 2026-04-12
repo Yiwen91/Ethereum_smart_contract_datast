@@ -143,8 +143,10 @@ The experiment reports now include:
 - micro precision / recall / F1
 - macro precision / recall / F1
 - weighted precision / recall / F1
+- micro / macro / weighted AUC-ROC
 - subset accuracy
-- per-label precision / recall / F1
+- inference latency
+- per-label accuracy / precision / recall / F1 / AUC-ROC
 
 Run multiple seeds and aggregate mean/std for stronger academic reporting:
 

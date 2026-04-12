@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Iterable
 
 import numpy as np
-from sklearn.metrics import accuracy_score, precision_recall_fscore_support
+from sklearn.metrics import accuracy_score, precision_recall_fscore_support, roc_auc_score
 
 from report_vulnerability_counts import VULN_TYPES
 
@@ -173,7 +173,9 @@ def apply_thresholds(
 def compute_multilabel_metrics(
     y_true: np.ndarray,
     y_pred: np.ndarray,
+    y_prob: np.ndarray | None = None,
     label_order: list[str] | None = None,
+    inference_seconds: float | None = None,
 ) -> dict:
     label_order = label_order or list(VULN_TYPES)
     micro_p, micro_r, micro_f1, _ = precision_recall_fscore_support(
@@ -202,16 +204,50 @@ def compute_multilabel_metrics(
     )
 
     per_label = {}
+    per_label_auc: list[float | None] = []
     for idx, label in enumerate(label_order):
+        label_accuracy = float(accuracy_score(y_true[:, idx], y_pred[:, idx]))
+        label_auc = None
+        if y_prob is not None:
+            y_true_col = y_true[:, idx]
+            if np.unique(y_true_col).size > 1:
+                label_auc = float(roc_auc_score(y_true_col, y_prob[:, idx]))
+        per_label_auc.append(label_auc)
         per_label[label] = {
+            "accuracy": label_accuracy,
             "precision": float(per_label_p[idx]),
             "recall": float(per_label_r[idx]),
             "f1": float(per_label_f1[idx]),
+            "auc_roc": label_auc,
             "support": int(per_label_support[idx]),
             "predicted_positive": int(y_pred[:, idx].sum()),
         }
 
     exact_match = float(accuracy_score(y_true, y_pred))
+    micro_auc = None
+    macro_auc = None
+    weighted_auc = None
+    if y_prob is not None:
+        micro_auc = float(roc_auc_score(y_true.reshape(-1), y_prob.reshape(-1)))
+        valid_auc_pairs = [
+            (auc_value, int(per_label_support[idx]))
+            for idx, auc_value in enumerate(per_label_auc)
+            if auc_value is not None
+        ]
+        if valid_auc_pairs:
+            auc_values = np.asarray([item[0] for item in valid_auc_pairs], dtype=np.float64)
+            auc_supports = np.asarray([item[1] for item in valid_auc_pairs], dtype=np.float64)
+            macro_auc = float(auc_values.mean())
+            if auc_supports.sum() > 0:
+                weighted_auc = float(np.average(auc_values, weights=auc_supports))
+            else:
+                weighted_auc = macro_auc
+
+    latency_total_seconds = None
+    latency_avg_ms_per_sample = None
+    if inference_seconds is not None:
+        latency_total_seconds = float(inference_seconds)
+        latency_avg_ms_per_sample = float((inference_seconds * 1000.0) / max(y_true.shape[0], 1))
     return {
         "samples": int(y_true.shape[0]),
         "micro_precision": float(micro_p),
@@ -223,12 +259,20 @@ def compute_multilabel_metrics(
         "weighted_precision": float(weighted_p),
         "weighted_recall": float(weighted_r),
         "weighted_f1": float(weighted_f1),
+        "micro_auc_roc": micro_auc,
+        "macro_auc_roc": macro_auc,
+        "weighted_auc_roc": weighted_auc,
         "subset_accuracy": exact_match,
+        "inference_latency_seconds": latency_total_seconds,
+        "inference_latency_ms_per_sample": latency_avg_ms_per_sample,
         "per_label": per_label,
     }
 
 
 def metrics_to_text(name: str, metrics: dict, thresholds: dict[str, float] | None = None) -> str:
+    def _format_metric(value) -> str:
+        return "n/a" if value is None else f"{value:.4f}"
+
     lines = [
         f"{name} Metrics",
         "=" * 72,
@@ -242,7 +286,12 @@ def metrics_to_text(name: str, metrics: dict, thresholds: dict[str, float] | Non
         f"Weighted Precision: {metrics['weighted_precision']:.4f}",
         f"Weighted Recall:    {metrics['weighted_recall']:.4f}",
         f"Weighted F1:        {metrics['weighted_f1']:.4f}",
+        f"Micro AUC-ROC:     {_format_metric(metrics['micro_auc_roc'])}",
+        f"Macro AUC-ROC:     {_format_metric(metrics['macro_auc_roc'])}",
+        f"Weighted AUC-ROC:  {_format_metric(metrics['weighted_auc_roc'])}",
         f"Subset Accuracy: {metrics['subset_accuracy']:.4f}",
+        f"Inference Latency (s): {metrics['inference_latency_seconds']:.4f}" if metrics["inference_latency_seconds"] is not None else "Inference Latency (s): n/a",
+        f"Inference Latency (ms/sample): {metrics['inference_latency_ms_per_sample']:.4f}" if metrics["inference_latency_ms_per_sample"] is not None else "Inference Latency (ms/sample): n/a",
         "",
         "Per-label metrics",
         "-" * 72,
@@ -253,8 +302,9 @@ def metrics_to_text(name: str, metrics: dict, thresholds: dict[str, float] | Non
         if thresholds is not None:
             threshold_suffix = f" threshold={thresholds[label]:.2f}"
         lines.append(
-            f"{label:30} P={item['precision']:.4f} R={item['recall']:.4f} "
-            f"F1={item['f1']:.4f} support={item['support']}{threshold_suffix}"
+            f"{label:30} Acc={item['accuracy']:.4f} P={item['precision']:.4f} "
+            f"R={item['recall']:.4f} F1={item['f1']:.4f} "
+            f"AUC={_format_metric(item['auc_roc'])} support={item['support']}{threshold_suffix}"
         )
     return "\n".join(lines) + "\n"
 
