@@ -141,6 +141,7 @@ def _config_from_args(args) -> dict:
                 "hybrid_graph_num_layers": args.hybrid_graph_num_layers,
                 "hybrid_fusion_dim": args.hybrid_fusion_dim,
                 "hybrid_attention_heads": args.hybrid_attention_heads,
+                "hybrid_graph_residual_scale": args.hybrid_graph_residual_scale,
                 "hybrid_dropout": args.hybrid_dropout,
                 "hybrid_train_batch_size": args.hybrid_train_batch_size,
                 "hybrid_eval_batch_size": args.hybrid_eval_batch_size,
@@ -476,6 +477,7 @@ def run_hybrid_experiment(args) -> Path:
         graph_num_layers=args.hybrid_graph_num_layers,
         fusion_dim=args.hybrid_fusion_dim,
         attention_heads=args.hybrid_attention_heads,
+        graph_residual_scale=args.hybrid_graph_residual_scale,
         dropout=args.hybrid_dropout,
         train_batch_size=args.hybrid_train_batch_size,
         eval_batch_size=args.hybrid_eval_batch_size,
@@ -797,6 +799,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--hybrid-graph-num-layers", type=int, default=2)
     parser.add_argument("--hybrid-fusion-dim", type=int, default=256)
     parser.add_argument("--hybrid-attention-heads", type=int, default=4)
+    parser.add_argument("--hybrid-graph-residual-scale", type=float, default=0.2)
     parser.add_argument("--hybrid-dropout", type=float, default=0.2)
     parser.add_argument("--hybrid-train-batch-size", type=int, default=4)
     parser.add_argument("--hybrid-eval-batch-size", type=int, default=8)

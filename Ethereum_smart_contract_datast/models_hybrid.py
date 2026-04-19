@@ -51,6 +51,7 @@ class _HybridCodeGraphClassifier(nn.Module):
         graph_hidden_dim: int,
         fusion_dim: int,
         attention_heads: int,
+        graph_residual_scale: float,
         num_labels: int,
         dropout: float,
     ):
@@ -66,22 +67,38 @@ class _HybridCodeGraphClassifier(nn.Module):
             dropout=dropout,
             batch_first=True,
         )
-        self.gate = nn.Sequential(
-            nn.Linear(fusion_dim * 2, fusion_dim),
+        self.graph_delta = nn.Sequential(
+            nn.LayerNorm(fusion_dim * 4),
+            nn.Linear(fusion_dim * 4, fusion_dim * 2),
             nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(fusion_dim * 2, fusion_dim),
+        )
+        self.graph_gate = nn.Sequential(
+            nn.LayerNorm(fusion_dim * 4),
+            nn.Linear(fusion_dim * 4, fusion_dim),
+            nn.GELU(),
+            nn.Dropout(dropout),
             nn.Linear(fusion_dim, fusion_dim),
             nn.Sigmoid(),
         )
+        self.graph_residual_scale = graph_residual_scale
         self.classifier = nn.Sequential(
-            nn.LayerNorm(fusion_dim * 5),
+            nn.LayerNorm(fusion_dim * 4),
             nn.Dropout(dropout),
-            nn.Linear(fusion_dim * 5, fusion_dim * 2),
+            nn.Linear(fusion_dim * 4, fusion_dim * 2),
             nn.GELU(),
             nn.Dropout(dropout),
             nn.Linear(fusion_dim * 2, num_labels),
         )
         self.dropout = dropout
         self.num_labels = num_labels
+        self._initialize_fusion_biases()
+
+    def _initialize_fusion_biases(self):
+        gate_output = self.graph_gate[-2]
+        if isinstance(gate_output, nn.Linear) and gate_output.bias is not None:
+            nn.init.constant_(gate_output.bias, -2.0)
 
     def _encode_graph(self, x: torch.Tensor, adj: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
         h = x
@@ -117,15 +134,21 @@ class _HybridCodeGraphClassifier(nn.Module):
         graph_feature = self.graph_proj(graph_embedding)
 
         modalities = torch.stack([text_feature, graph_feature], dim=1)
-        attended_modalities, _ = self.modality_attention(modalities, modalities, modalities)
-        attended_summary = attended_modalities.mean(dim=1)
-
-        gate = self.gate(torch.cat([text_feature, graph_feature], dim=-1))
-        gated_fusion = gate * text_feature + (1.0 - gate) * graph_feature
+        attended_modalities, _ = self.modality_attention(
+            text_feature.unsqueeze(1),
+            modalities,
+            modalities,
+        )
+        attended_summary = attended_modalities.squeeze(1)
         difference = torch.abs(text_feature - graph_feature)
+        interaction = text_feature * graph_feature
+        fusion_inputs = torch.cat([text_feature, graph_feature, difference, interaction], dim=-1)
+        gate = self.graph_gate(fusion_inputs)
+        graph_delta = self.graph_delta(fusion_inputs)
+        gated_fusion = text_feature + self.graph_residual_scale * gate * graph_delta
 
         fused = torch.cat(
-            [text_feature, graph_feature, attended_summary, gated_fusion, difference],
+            [text_feature, attended_summary, gated_fusion, difference],
             dim=-1,
         )
         return self.classifier(fused)
@@ -143,6 +166,7 @@ class HybridCodeBERTGNNMultilabelBaseline:
         graph_num_layers: int = 2,
         fusion_dim: int = 256,
         attention_heads: int = 4,
+        graph_residual_scale: float = 0.2,
         dropout: float = 0.2,
         train_batch_size: int = 4,
         eval_batch_size: int = 8,
@@ -163,6 +187,7 @@ class HybridCodeBERTGNNMultilabelBaseline:
         self.graph_num_layers = graph_num_layers
         self.fusion_dim = fusion_dim
         self.attention_heads = attention_heads
+        self.graph_residual_scale = graph_residual_scale
         self.dropout = dropout
         self.train_batch_size = train_batch_size
         self.eval_batch_size = eval_batch_size
@@ -201,6 +226,7 @@ class HybridCodeBERTGNNMultilabelBaseline:
             graph_hidden_dim=self.graph_hidden_dim,
             fusion_dim=self.fusion_dim,
             attention_heads=self.attention_heads,
+            graph_residual_scale=self.graph_residual_scale,
             num_labels=num_labels,
             dropout=self.dropout,
         ).to(self.device)
@@ -405,6 +431,7 @@ class HybridCodeBERTGNNMultilabelBaseline:
             "graph_num_layers": self.graph_num_layers,
             "fusion_dim": self.fusion_dim,
             "attention_heads": self.attention_heads,
+            "graph_residual_scale": self.graph_residual_scale,
             "dropout": self.dropout,
             "num_labels": self.model.num_labels,
         }

@@ -230,28 +230,28 @@ python train_experiment.py --model gnn --split-dir experiment_splits/esc_primary
 Train a `Hybrid CodeBERT + AST/CFG GNN` model on the same ESC split files:
 
 ```cmd
-py train_experiment.py --model hybrid --split-dir experiment_splits\esc_primary --output-dir experiments\hybrid_baseline --run-name hybrid_smoke_test --max-train-samples 2000 --max-val-samples 400 --max-test-samples 400 --sample-strategy reservoir --hybrid-epochs 1 --hybrid-train-batch-size 2 --hybrid-eval-batch-size 4 --max-length 192 --hybrid-max-nodes 96 --hybrid-feature-dim 256 --hybrid-graph-hidden-dim 128 --hybrid-graph-num-layers 2 --hybrid-fusion-dim 256 --hybrid-attention-heads 4
+py train_experiment.py --model hybrid --split-dir experiment_splits\esc_primary --output-dir experiments\hybrid_baseline --run-name hybrid_smoke_test --max-train-samples 2000 --max-val-samples 400 --max-test-samples 400 --sample-strategy reservoir --hybrid-epochs 1 --hybrid-train-batch-size 2 --hybrid-eval-batch-size 4 --max-length 192 --hybrid-max-nodes 96 --hybrid-feature-dim 256 --hybrid-graph-hidden-dim 128 --hybrid-graph-num-layers 2 --hybrid-fusion-dim 256 --hybrid-attention-heads 4 --hybrid-graph-residual-scale 0.2
 ```
 
 The `Hybrid` model uses:
 
 - `CodeBERT` as the semantic encoder over raw function code
 - the fused `AST/CFG` graph builder from the structural baseline
-- multi-head modality attention plus a learned fusion gate before multilabel prediction
+- text-anchored modality attention plus a gated graph residual before multilabel prediction
 - the same threshold tuning, saved metrics, and per-label reporting as the other baselines
 
 Useful `Hybrid` options:
 
 - `--hybrid-train-batch-size` and `--hybrid-eval-batch-size` for GPU memory control
 - `--hybrid-transformer-learning-rate` and `--hybrid-head-learning-rate` to tune the encoder and fusion head separately
-- `--hybrid-fusion-dim`, `--hybrid-attention-heads`, and `--hybrid-dropout` for the fusion block
+- `--hybrid-fusion-dim`, `--hybrid-attention-heads`, `--hybrid-graph-residual-scale`, and `--hybrid-dropout` for the fusion block
 - `--hybrid-max-nodes`, `--hybrid-feature-dim`, `--hybrid-graph-hidden-dim`, and `--hybrid-graph-num-layers` for the graph branch
 - `--hybrid-max-pos-weight` and `--hybrid-grad-clip-norm` for imbalance handling and stability
 
 A safer one-shot `Hybrid` command for Colab is:
 
 ```cmd
-python train_experiment.py --model hybrid --codebert-model-name microsoft/codebert-base --split-dir experiment_splits/esc_primary --output-dir experiments/hybrid_baseline --run-name esc_hybrid_tuned_100k --max-train-samples 100000 --max-val-samples 10000 --max-test-samples 10000 --sample-strategy reservoir --hybrid-epochs 3 --hybrid-train-batch-size 4 --hybrid-eval-batch-size 8 --max-length 192 --hybrid-max-nodes 96 --hybrid-feature-dim 256 --hybrid-graph-hidden-dim 128 --hybrid-graph-num-layers 2 --hybrid-fusion-dim 256 --hybrid-attention-heads 4 --hybrid-dropout 0.2 --hybrid-transformer-learning-rate 2e-5 --hybrid-head-learning-rate 1e-3 --hybrid-weight-decay 0.01 --hybrid-max-pos-weight 8 --hybrid-grad-clip-norm 1.0 --default-threshold 0.5 --threshold-min-support 5 --threshold-min-precision 0.15
+python train_experiment.py --model hybrid --codebert-model-name microsoft/codebert-base --split-dir experiment_splits/esc_primary --output-dir experiments/hybrid_baseline --run-name esc_hybrid_tuned_100k --max-train-samples 100000 --max-val-samples 10000 --max-test-samples 10000 --sample-strategy reservoir --hybrid-epochs 3 --hybrid-train-batch-size 2 --hybrid-eval-batch-size 4 --max-length 192 --hybrid-max-nodes 96 --hybrid-feature-dim 256 --hybrid-graph-hidden-dim 128 --hybrid-graph-num-layers 2 --hybrid-fusion-dim 256 --hybrid-attention-heads 4 --hybrid-graph-residual-scale 0.2 --hybrid-dropout 0.15 --hybrid-transformer-learning-rate 1.5e-5 --hybrid-head-learning-rate 7e-4 --hybrid-weight-decay 0.01 --hybrid-max-pos-weight 8 --hybrid-grad-clip-norm 1.0 --default-threshold 0.5 --threshold-min-support 5 --threshold-min-precision 0.15
 ```
 
 ### Secondary Dataset: SmartBugs Wild
