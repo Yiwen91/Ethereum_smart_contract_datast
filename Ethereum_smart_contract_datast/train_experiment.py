@@ -26,6 +26,7 @@ from experiment_utils import (
 )
 from models_codebert import CodeBERTMultilabelBaseline
 from models_gnn import ASTCFGFunctionGNNMultilabelBaseline
+from models_hybrid import HybridCodeBERTGNNMultilabelBaseline
 from models_tabular import TabularMultilabelBaseline
 
 
@@ -127,6 +128,30 @@ def _config_from_args(args) -> dict:
                 "gnn_max_pos_weight": args.gnn_max_pos_weight,
                 "gnn_grad_clip_norm": args.gnn_grad_clip_norm,
                 "device": args.device,
+            }
+        )
+    elif args.model == "hybrid":
+        config.update(
+            {
+                "codebert_model_name": args.codebert_model_name,
+                "max_length": args.max_length,
+                "hybrid_max_nodes": args.hybrid_max_nodes,
+                "hybrid_feature_dim": args.hybrid_feature_dim,
+                "hybrid_graph_hidden_dim": args.hybrid_graph_hidden_dim,
+                "hybrid_graph_num_layers": args.hybrid_graph_num_layers,
+                "hybrid_fusion_dim": args.hybrid_fusion_dim,
+                "hybrid_attention_heads": args.hybrid_attention_heads,
+                "hybrid_dropout": args.hybrid_dropout,
+                "hybrid_train_batch_size": args.hybrid_train_batch_size,
+                "hybrid_eval_batch_size": args.hybrid_eval_batch_size,
+                "hybrid_transformer_learning_rate": args.hybrid_transformer_learning_rate,
+                "hybrid_head_learning_rate": args.hybrid_head_learning_rate,
+                "hybrid_weight_decay": args.hybrid_weight_decay,
+                "hybrid_epochs": args.hybrid_epochs,
+                "hybrid_max_pos_weight": args.hybrid_max_pos_weight,
+                "hybrid_grad_clip_norm": args.hybrid_grad_clip_norm,
+                "device": args.device,
+                "save_model": args.save_model,
             }
         )
     config.update(
@@ -437,6 +462,94 @@ def run_gnn_experiment(args) -> Path:
     return result
 
 
+def run_hybrid_experiment(args) -> Path:
+    run_dir = _ensure_run_dir(args.output_dir, args.run_name)
+    train_split, val_split, test_split = _load_splits(args)
+
+    print("[train] Training Hybrid CodeBERT + AST/CFG GNN model...")
+    model = HybridCodeBERTGNNMultilabelBaseline(
+        model_name=args.codebert_model_name,
+        max_length=args.max_length,
+        max_nodes=args.hybrid_max_nodes,
+        feature_dim=args.hybrid_feature_dim,
+        graph_hidden_dim=args.hybrid_graph_hidden_dim,
+        graph_num_layers=args.hybrid_graph_num_layers,
+        fusion_dim=args.hybrid_fusion_dim,
+        attention_heads=args.hybrid_attention_heads,
+        dropout=args.hybrid_dropout,
+        train_batch_size=args.hybrid_train_batch_size,
+        eval_batch_size=args.hybrid_eval_batch_size,
+        transformer_learning_rate=args.hybrid_transformer_learning_rate,
+        head_learning_rate=args.hybrid_head_learning_rate,
+        weight_decay=args.hybrid_weight_decay,
+        epochs=args.hybrid_epochs,
+        max_pos_weight=args.hybrid_max_pos_weight,
+        grad_clip_norm=args.hybrid_grad_clip_norm,
+        device=args.device,
+        seed=args.seed,
+    )
+    model.fit(
+        train_split.records,
+        train_split.labels,
+        val_records=val_split.records,
+        val_labels=val_split.labels,
+    )
+
+    print("[eval] Selecting per-label thresholds on validation split...")
+    val_start = perf_counter()
+    val_prob = model.predict_proba(val_split.records)
+    val_inference_seconds = perf_counter() - val_start
+    thresholds = choose_thresholds(
+        val_split.labels,
+        val_prob,
+        label_order=VULN_TYPES,
+        default_threshold=args.default_threshold,
+        min_support=args.threshold_min_support,
+        min_precision=args.threshold_min_precision,
+    )
+    val_pred = apply_thresholds(val_prob, thresholds, label_order=VULN_TYPES)
+    val_metrics = compute_multilabel_metrics(
+        val_split.labels,
+        val_pred,
+        y_prob=val_prob,
+        label_order=VULN_TYPES,
+        inference_seconds=val_inference_seconds,
+    )
+
+    print("[eval] Evaluating on test split...")
+    test_start = perf_counter()
+    test_prob = model.predict_proba(test_split.records)
+    test_inference_seconds = perf_counter() - test_start
+    test_pred = apply_thresholds(test_prob, thresholds, label_order=VULN_TYPES)
+    test_metrics = compute_multilabel_metrics(
+        test_split.labels,
+        test_pred,
+        y_prob=test_prob,
+        label_order=VULN_TYPES,
+        inference_seconds=test_inference_seconds,
+    )
+
+    if args.save_model:
+        model.save_model(str(run_dir / "model"))
+
+    result = _save_run_outputs(
+        run_dir=run_dir,
+        summary_title="ESC Hybrid CodeBERT + AST/CFG GNN Summary",
+        train_split=train_split,
+        val_split=val_split,
+        test_split=test_split,
+        val_prob=val_prob,
+        val_pred=val_pred,
+        val_metrics=val_metrics,
+        test_prob=test_prob,
+        test_pred=test_pred,
+        test_metrics=test_metrics,
+        thresholds=thresholds,
+        config=_config_from_args(args),
+    )
+    return result
+
+
 def _aggregate_metric_group(metric_dicts: list[dict]) -> dict:
     scalar_keys = [
         "micro_precision",
@@ -570,6 +683,8 @@ def run_multi_seed_experiments(args):
             result = run_codebert_experiment(seed_args)
         elif seed_args.model == "gnn":
             result = run_gnn_experiment(seed_args)
+        elif seed_args.model == "hybrid":
+            result = run_hybrid_experiment(seed_args)
         else:
             raise ValueError(f"Unsupported model: {seed_args.model}")
         run_results.append(
@@ -607,7 +722,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--model",
-        choices=["tabular", "codebert", "gnn"],
+        choices=["tabular", "codebert", "gnn", "hybrid"],
         default="tabular",
         help="Which baseline to run.",
     )
@@ -676,6 +791,21 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--gnn-epochs", type=int, default=3)
     parser.add_argument("--gnn-max-pos-weight", type=float, default=8.0)
     parser.add_argument("--gnn-grad-clip-norm", type=float, default=1.0)
+    parser.add_argument("--hybrid-max-nodes", type=int, default=128)
+    parser.add_argument("--hybrid-feature-dim", type=int, default=256)
+    parser.add_argument("--hybrid-graph-hidden-dim", type=int, default=128)
+    parser.add_argument("--hybrid-graph-num-layers", type=int, default=2)
+    parser.add_argument("--hybrid-fusion-dim", type=int, default=256)
+    parser.add_argument("--hybrid-attention-heads", type=int, default=4)
+    parser.add_argument("--hybrid-dropout", type=float, default=0.2)
+    parser.add_argument("--hybrid-train-batch-size", type=int, default=4)
+    parser.add_argument("--hybrid-eval-batch-size", type=int, default=8)
+    parser.add_argument("--hybrid-transformer-learning-rate", type=float, default=2e-5)
+    parser.add_argument("--hybrid-head-learning-rate", type=float, default=1e-3)
+    parser.add_argument("--hybrid-weight-decay", type=float, default=0.01)
+    parser.add_argument("--hybrid-epochs", type=int, default=3)
+    parser.add_argument("--hybrid-max-pos-weight", type=float, default=8.0)
+    parser.add_argument("--hybrid-grad-clip-norm", type=float, default=1.0)
     return parser
 
 
@@ -687,6 +817,8 @@ def main():
             if args.model == "codebert"
             else "experiments/gnn_baseline"
             if args.model == "gnn"
+            else "experiments/hybrid_baseline"
+            if args.model == "hybrid"
             else "experiments/tabular_baseline"
         )
     if args.seeds and len(args.seeds) > 1:
@@ -702,6 +834,9 @@ def main():
         return
     if args.model == "gnn":
         run_gnn_experiment(args)
+        return
+    if args.model == "hybrid":
+        run_hybrid_experiment(args)
         return
     raise ValueError(f"Unsupported model: {args.model}")
 

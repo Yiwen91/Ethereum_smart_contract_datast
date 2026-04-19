@@ -409,6 +409,7 @@ class _ASTCFGGraphBuilder:
         self.max_nodes = max_nodes
         self.feature_dim = feature_dim
         self._contract_cache: dict[str, _ContractArtifacts] = {}
+        self._graph_cache: dict[tuple[str, str, int, int], tuple[np.ndarray, np.ndarray, np.ndarray]] = {}
 
     def build_graph(self, record: dict) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
         contract_file = record.get("contract_file", "")
@@ -418,24 +419,39 @@ class _ASTCFGGraphBuilder:
                 max_nodes=self.max_nodes,
                 feature_dim=self.feature_dim,
             )
+        cache_key = (
+            contract_file,
+            record.get("function_signature", "") or record.get("function_name", ""),
+            int(record.get("start_line", 0) or 0),
+            int(record.get("end_line", 0) or 0),
+        )
+        cached = self._graph_cache.get(cache_key)
+        if cached is not None:
+            return cached
 
         try:
             artifacts = self._load_contract_artifacts(contract_file)
             ast_nodes, ast_edges = self._extract_ast_subgraph(artifacts, record)
             cfg_nodes, cfg_edges = self._extract_cfg_subgraph(artifacts, record)
             if not ast_nodes and not cfg_nodes:
-                return _build_line_graph(
+                graph = _build_line_graph(
                     record.get("function_code", ""),
                     max_nodes=self.max_nodes,
                     feature_dim=self.feature_dim,
                 )
-            return self._fuse_graph(artifacts, ast_nodes, ast_edges, cfg_nodes, cfg_edges)
+                self._graph_cache[cache_key] = graph
+                return graph
+            graph = self._fuse_graph(artifacts, ast_nodes, ast_edges, cfg_nodes, cfg_edges)
+            self._graph_cache[cache_key] = graph
+            return graph
         except Exception:
-            return _build_line_graph(
+            graph = _build_line_graph(
                 record.get("function_code", ""),
                 max_nodes=self.max_nodes,
                 feature_dim=self.feature_dim,
             )
+            self._graph_cache[cache_key] = graph
+            return graph
 
     def _load_contract_artifacts(self, contract_file: str) -> _ContractArtifacts:
         if contract_file in self._contract_cache:
