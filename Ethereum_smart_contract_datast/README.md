@@ -230,7 +230,7 @@ python train_experiment.py --model gnn --split-dir experiment_splits/esc_primary
 Train a `Hybrid CodeBERT + AST/CFG GNN` model on the same ESC split files:
 
 ```cmd
-py train_experiment.py --model hybrid --split-dir experiment_splits\esc_primary --output-dir experiments\hybrid_baseline --run-name hybrid_smoke_test --max-train-samples 2000 --max-val-samples 400 --max-test-samples 400 --sample-strategy reservoir --hybrid-epochs 1 --hybrid-train-batch-size 2 --hybrid-eval-batch-size 4 --max-length 192 --hybrid-max-nodes 96 --hybrid-feature-dim 256 --hybrid-graph-hidden-dim 128 --hybrid-graph-num-layers 2 --hybrid-fusion-dim 256 --hybrid-attention-heads 4 --hybrid-graph-residual-scale 0.2
+py train_experiment.py --model hybrid --split-dir experiment_splits\esc_primary --output-dir experiments\hybrid_baseline --run-name hybrid_smoke_test --max-train-samples 2000 --max-val-samples 400 --max-test-samples 400 --sample-strategy reservoir --hybrid-epochs 1 --hybrid-train-batch-size 2 --hybrid-eval-batch-size 4 --max-length 192 --hybrid-max-nodes 96 --hybrid-feature-dim 256 --hybrid-graph-hidden-dim 128 --hybrid-graph-num-layers 2 --hybrid-fusion-dim 256 --hybrid-attention-heads 4 --hybrid-graph-residual-scale 0.2 --hybrid-gradient-accumulation-steps 2 --hybrid-checkpoint-metric micro_f1 --threshold-candidates 0.4 0.5 0.6 0.7 0.8
 ```
 
 The `Hybrid` model uses:
@@ -246,12 +246,20 @@ Useful `Hybrid` options:
 - `--hybrid-transformer-learning-rate` and `--hybrid-head-learning-rate` to tune the encoder and fusion head separately
 - `--hybrid-fusion-dim`, `--hybrid-attention-heads`, `--hybrid-graph-residual-scale`, and `--hybrid-dropout` for the fusion block
 - `--hybrid-max-nodes`, `--hybrid-feature-dim`, `--hybrid-graph-hidden-dim`, and `--hybrid-graph-num-layers` for the graph branch
-- `--hybrid-max-pos-weight` and `--hybrid-grad-clip-norm` for imbalance handling and stability
+- `--hybrid-max-pos-weight`, `--hybrid-grad-clip-norm`, `--hybrid-gradient-accumulation-steps`, and `--hybrid-encoder-warmup-epochs` for stability
+- `--hybrid-checkpoint-metric` to save the best epoch by validation `micro_f1`, `weighted_f1`, or `subset_accuracy`
+- `--threshold-candidates` to search a finer threshold grid when optimizing headline F1
 
-A safer one-shot `Hybrid` command for Colab is:
+A best-shot headline `Hybrid` command for Colab is:
 
 ```cmd
-python train_experiment.py --model hybrid --codebert-model-name microsoft/codebert-base --split-dir experiment_splits/esc_primary --output-dir experiments/hybrid_baseline --run-name esc_hybrid_tuned_100k --max-train-samples 100000 --max-val-samples 10000 --max-test-samples 10000 --sample-strategy reservoir --hybrid-epochs 3 --hybrid-train-batch-size 2 --hybrid-eval-batch-size 4 --max-length 192 --hybrid-max-nodes 96 --hybrid-feature-dim 256 --hybrid-graph-hidden-dim 128 --hybrid-graph-num-layers 2 --hybrid-fusion-dim 256 --hybrid-attention-heads 4 --hybrid-graph-residual-scale 0.2 --hybrid-dropout 0.15 --hybrid-transformer-learning-rate 1.5e-5 --hybrid-head-learning-rate 7e-4 --hybrid-weight-decay 0.01 --hybrid-max-pos-weight 8 --hybrid-grad-clip-norm 1.0 --default-threshold 0.5 --threshold-min-support 5 --threshold-min-precision 0.15
+python train_experiment.py --model hybrid --codebert-model-name microsoft/codebert-base --split-dir experiment_splits/esc_primary --output-dir experiments/hybrid_baseline --run-name esc_hybrid_headline_100k --max-train-samples 100000 --max-val-samples 10000 --max-test-samples 10000 --sample-strategy reservoir --hybrid-epochs 4 --hybrid-train-batch-size 2 --hybrid-eval-batch-size 4 --max-length 192 --hybrid-max-nodes 96 --hybrid-feature-dim 256 --hybrid-graph-hidden-dim 128 --hybrid-graph-num-layers 2 --hybrid-fusion-dim 256 --hybrid-attention-heads 4 --hybrid-graph-residual-scale 0.2 --hybrid-dropout 0.15 --hybrid-transformer-learning-rate 1.5e-5 --hybrid-head-learning-rate 7e-4 --hybrid-weight-decay 0.01 --hybrid-max-pos-weight 8 --hybrid-grad-clip-norm 1.0 --hybrid-gradient-accumulation-steps 4 --hybrid-encoder-warmup-epochs 1 --hybrid-checkpoint-metric micro_f1 --default-threshold 0.5 --threshold-min-support 5 --threshold-min-precision 0.0 --threshold-candidates 0.4 0.45 0.5 0.55 0.6 0.65 0.7 0.75 0.8 0.85 0.9
+```
+
+If the best-shot run does not improve enough, try this fallback with slightly weaker graph influence and a slightly lower head LR:
+
+```cmd
+python train_experiment.py --model hybrid --codebert-model-name microsoft/codebert-base --split-dir experiment_splits/esc_primary --output-dir experiments/hybrid_baseline --run-name esc_hybrid_headline_fallback_100k --max-train-samples 100000 --max-val-samples 10000 --max-test-samples 10000 --sample-strategy reservoir --hybrid-epochs 4 --hybrid-train-batch-size 2 --hybrid-eval-batch-size 4 --max-length 192 --hybrid-max-nodes 96 --hybrid-feature-dim 256 --hybrid-graph-hidden-dim 128 --hybrid-graph-num-layers 2 --hybrid-fusion-dim 256 --hybrid-attention-heads 4 --hybrid-graph-residual-scale 0.12 --hybrid-dropout 0.15 --hybrid-transformer-learning-rate 1.5e-5 --hybrid-head-learning-rate 5e-4 --hybrid-weight-decay 0.01 --hybrid-max-pos-weight 8 --hybrid-grad-clip-norm 1.0 --hybrid-gradient-accumulation-steps 4 --hybrid-encoder-warmup-epochs 1 --hybrid-checkpoint-metric micro_f1 --default-threshold 0.5 --threshold-min-support 5 --threshold-min-precision 0.0 --threshold-candidates 0.4 0.45 0.5 0.55 0.6 0.65 0.7 0.75 0.8 0.85 0.9
 ```
 
 ### Secondary Dataset: SmartBugs Wild

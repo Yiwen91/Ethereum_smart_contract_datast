@@ -151,6 +151,9 @@ def _config_from_args(args) -> dict:
                 "hybrid_epochs": args.hybrid_epochs,
                 "hybrid_max_pos_weight": args.hybrid_max_pos_weight,
                 "hybrid_grad_clip_norm": args.hybrid_grad_clip_norm,
+                "hybrid_gradient_accumulation_steps": args.hybrid_gradient_accumulation_steps,
+                "hybrid_encoder_warmup_epochs": args.hybrid_encoder_warmup_epochs,
+                "hybrid_checkpoint_metric": args.hybrid_checkpoint_metric,
                 "device": args.device,
                 "save_model": args.save_model,
             }
@@ -160,6 +163,7 @@ def _config_from_args(args) -> dict:
             "default_threshold": args.default_threshold,
             "threshold_min_support": args.threshold_min_support,
             "threshold_min_precision": args.threshold_min_precision,
+            "threshold_candidates": args.threshold_candidates,
         }
     )
     return config
@@ -259,6 +263,7 @@ def run_tabular_experiment(args) -> Path:
         val_split.labels,
         val_prob,
         label_order=VULN_TYPES,
+        candidate_thresholds=args.threshold_candidates,
         default_threshold=args.default_threshold,
         min_support=args.threshold_min_support,
         min_precision=args.threshold_min_precision,
@@ -336,6 +341,7 @@ def run_codebert_experiment(args) -> Path:
         val_split.labels,
         val_prob,
         label_order=VULN_TYPES,
+        candidate_thresholds=args.threshold_candidates,
         default_threshold=args.default_threshold,
         min_support=args.threshold_min_support,
         min_precision=args.threshold_min_precision,
@@ -419,6 +425,7 @@ def run_gnn_experiment(args) -> Path:
         val_split.labels,
         val_prob,
         label_order=VULN_TYPES,
+        candidate_thresholds=args.threshold_candidates,
         default_threshold=args.default_threshold,
         min_support=args.threshold_min_support,
         min_precision=args.threshold_min_precision,
@@ -487,6 +494,13 @@ def run_hybrid_experiment(args) -> Path:
         epochs=args.hybrid_epochs,
         max_pos_weight=args.hybrid_max_pos_weight,
         grad_clip_norm=args.hybrid_grad_clip_norm,
+        gradient_accumulation_steps=args.hybrid_gradient_accumulation_steps,
+        encoder_warmup_epochs=args.hybrid_encoder_warmup_epochs,
+        checkpoint_metric=args.hybrid_checkpoint_metric,
+        selection_candidate_thresholds=args.threshold_candidates,
+        selection_default_threshold=args.default_threshold,
+        selection_threshold_min_support=args.threshold_min_support,
+        selection_threshold_min_precision=args.threshold_min_precision,
         device=args.device,
         seed=args.seed,
     )
@@ -505,6 +519,7 @@ def run_hybrid_experiment(args) -> Path:
         val_split.labels,
         val_prob,
         label_order=VULN_TYPES,
+        candidate_thresholds=args.threshold_candidates,
         default_threshold=args.default_threshold,
         min_support=args.threshold_min_support,
         min_precision=args.threshold_min_precision,
@@ -781,6 +796,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--default-threshold", type=float, default=0.5)
     parser.add_argument("--threshold-min-support", type=int, default=5)
     parser.add_argument("--threshold-min-precision", type=float, default=0.15)
+    parser.add_argument(
+        "--threshold-candidates",
+        nargs="+",
+        type=float,
+        help="Optional explicit threshold search grid, e.g. 0.4 0.45 0.5 0.55.",
+    )
     parser.add_argument("--gnn-max-nodes", type=int, default=48)
     parser.add_argument("--gnn-feature-dim", type=int, default=256)
     parser.add_argument("--gnn-hidden-dim", type=int, default=128)
@@ -809,6 +830,13 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--hybrid-epochs", type=int, default=3)
     parser.add_argument("--hybrid-max-pos-weight", type=float, default=8.0)
     parser.add_argument("--hybrid-grad-clip-norm", type=float, default=1.0)
+    parser.add_argument("--hybrid-gradient-accumulation-steps", type=int, default=1)
+    parser.add_argument("--hybrid-encoder-warmup-epochs", type=int, default=0)
+    parser.add_argument(
+        "--hybrid-checkpoint-metric",
+        choices=["micro_f1", "weighted_f1", "subset_accuracy"],
+        default="micro_f1",
+    )
     return parser
 
 

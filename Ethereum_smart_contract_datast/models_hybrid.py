@@ -17,6 +17,7 @@ from torch.optim import AdamW
 from torch.utils.data import DataLoader, Dataset
 from transformers import AutoModel, AutoTokenizer
 
+from experiment_utils import VULN_TYPES, apply_thresholds, choose_thresholds, compute_multilabel_metrics
 from models_gnn import _ASTCFGGraphBuilder, _GCNLayer
 
 
@@ -24,6 +25,9 @@ from models_gnn import _ASTCFGGraphBuilder, _GCNLayer
 class HybridTrainingHistory:
     train_losses: list[float]
     val_losses: list[float]
+    val_micro_f1: list[float]
+    val_weighted_f1: list[float]
+    best_epoch: int | None = None
 
 
 class _HybridFunctionDataset(Dataset):
@@ -176,6 +180,13 @@ class HybridCodeBERTGNNMultilabelBaseline:
         epochs: int = 3,
         max_pos_weight: float = 8.0,
         grad_clip_norm: float = 1.0,
+        gradient_accumulation_steps: int = 1,
+        encoder_warmup_epochs: int = 0,
+        checkpoint_metric: str = "micro_f1",
+        selection_candidate_thresholds: list[float] | None = None,
+        selection_default_threshold: float = 0.5,
+        selection_threshold_min_support: int = 5,
+        selection_threshold_min_precision: float = 0.15,
         device: str | None = None,
         seed: int = 42,
     ):
@@ -197,11 +208,23 @@ class HybridCodeBERTGNNMultilabelBaseline:
         self.epochs = epochs
         self.max_pos_weight = max_pos_weight
         self.grad_clip_norm = grad_clip_norm
+        self.gradient_accumulation_steps = max(1, gradient_accumulation_steps)
+        self.encoder_warmup_epochs = max(0, encoder_warmup_epochs)
+        self.checkpoint_metric = checkpoint_metric
+        self.selection_candidate_thresholds = selection_candidate_thresholds
+        self.selection_default_threshold = selection_default_threshold
+        self.selection_threshold_min_support = selection_threshold_min_support
+        self.selection_threshold_min_precision = selection_threshold_min_precision
         self.seed = seed
         self.device = torch.device(device or ("cuda" if torch.cuda.is_available() else "cpu"))
         self.tokenizer = AutoTokenizer.from_pretrained(model_name)
         self.model: _HybridCodeGraphClassifier | None = None
-        self.history = HybridTrainingHistory(train_losses=[], val_losses=[])
+        self.history = HybridTrainingHistory(
+            train_losses=[],
+            val_losses=[],
+            val_micro_f1=[],
+            val_weighted_f1=[],
+        )
         self.graph_builder = _ASTCFGGraphBuilder(max_nodes=max_nodes, feature_dim=feature_dim)
         self._set_seed(seed)
 
@@ -297,6 +320,16 @@ class HybridCodeBERTGNNMultilabelBaseline:
             weight_decay=self.weight_decay,
         )
 
+    def _set_encoder_trainable(self, trainable: bool):
+        assert self.model is not None
+        for param in self.model.text_encoder.parameters():
+            param.requires_grad = trainable
+
+    def _checkpoint_score(self, metrics: dict, val_loss: float) -> tuple[float, float, float]:
+        primary = float(metrics.get(self.checkpoint_metric, 0.0))
+        weighted = float(metrics.get("weighted_f1", 0.0))
+        return (primary, weighted, -float(val_loss))
+
     def fit(
         self,
         train_records: list[dict],
@@ -329,27 +362,46 @@ class HybridCodeBERTGNNMultilabelBaseline:
             )
 
         best_state = None
-        best_val_loss = None
-        self.history = HybridTrainingHistory(train_losses=[], val_losses=[])
+        best_score = None
+        self.history = HybridTrainingHistory(
+            train_losses=[],
+            val_losses=[],
+            val_micro_f1=[],
+            val_weighted_f1=[],
+        )
 
         for epoch in range(self.epochs):
             assert self.model is not None
+            encoder_trainable = epoch >= self.encoder_warmup_epochs
+            self._set_encoder_trainable(encoder_trainable)
+            if epoch == 0 and self.encoder_warmup_epochs > 0:
+                print(
+                    f"[train] Freezing text encoder for {self.encoder_warmup_epochs} "
+                    f"epoch(s) of warmup."
+                )
             self.model.train()
             running_loss = 0.0
             total_examples = 0
-            for batch in train_loader:
+            optimizer.zero_grad(set_to_none=True)
+            for step, batch in enumerate(train_loader, start=1):
                 labels = batch.pop("labels").to(self.device)
                 batch = {key: value.to(self.device) for key, value in batch.items()}
-                optimizer.zero_grad()
                 logits = self.model(**batch)
-                loss = loss_fn(logits, labels)
+                raw_loss = loss_fn(logits, labels)
+                loss = raw_loss / self.gradient_accumulation_steps
                 loss.backward()
-                if self.grad_clip_norm and self.grad_clip_norm > 0:
-                    torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.grad_clip_norm)
-                optimizer.step()
+                should_step = (
+                    step % self.gradient_accumulation_steps == 0
+                    or step == len(train_loader)
+                )
+                if should_step:
+                    if self.grad_clip_norm and self.grad_clip_norm > 0:
+                        torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.grad_clip_norm)
+                    optimizer.step()
+                    optimizer.zero_grad(set_to_none=True)
 
                 batch_size = labels.size(0)
-                running_loss += loss.item() * batch_size
+                running_loss += raw_loss.item() * batch_size
                 total_examples += batch_size
 
             train_loss = running_loss / max(total_examples, 1)
@@ -359,15 +411,37 @@ class HybridCodeBERTGNNMultilabelBaseline:
                 print(f"[train] Epoch {epoch + 1}/{self.epochs} train_loss={train_loss:.4f}")
                 continue
 
-            val_loss = self.evaluate_loss(val_loader, loss_fn)
+            val_loss, val_prob = self.evaluate_loss_and_probabilities(val_loader, loss_fn)
             self.history.val_losses.append(val_loss)
-            if best_val_loss is None or val_loss < best_val_loss:
-                best_val_loss = val_loss
+            thresholds = choose_thresholds(
+                val_labels,
+                val_prob,
+                label_order=VULN_TYPES,
+                candidate_thresholds=self.selection_candidate_thresholds,
+                default_threshold=self.selection_default_threshold,
+                min_support=self.selection_threshold_min_support,
+                min_precision=self.selection_threshold_min_precision,
+            )
+            val_pred = apply_thresholds(val_prob, thresholds, label_order=VULN_TYPES)
+            val_metrics = compute_multilabel_metrics(
+                val_labels,
+                val_pred,
+                y_prob=val_prob,
+                label_order=VULN_TYPES,
+            )
+            self.history.val_micro_f1.append(val_metrics["micro_f1"])
+            self.history.val_weighted_f1.append(val_metrics["weighted_f1"])
+            current_score = self._checkpoint_score(val_metrics, val_loss)
+            if best_score is None or current_score > best_score:
+                best_score = current_score
                 best_state = {key: value.detach().cpu().clone() for key, value in self.model.state_dict().items()}
+                self.history.best_epoch = epoch + 1
 
             print(
                 f"[train] Epoch {epoch + 1}/{self.epochs} "
-                f"train_loss={train_loss:.4f} val_loss={val_loss:.4f}"
+                f"train_loss={train_loss:.4f} val_loss={val_loss:.4f} "
+                f"val_micro_f1={val_metrics['micro_f1']:.4f} "
+                f"val_weighted_f1={val_metrics['weighted_f1']:.4f}"
             )
 
         if best_state is not None:
@@ -375,10 +449,19 @@ class HybridCodeBERTGNNMultilabelBaseline:
         return self
 
     def evaluate_loss(self, dataloader: DataLoader, loss_fn: nn.Module) -> float:
+        loss, _ = self.evaluate_loss_and_probabilities(dataloader, loss_fn)
+        return loss
+
+    def evaluate_loss_and_probabilities(
+        self,
+        dataloader: DataLoader,
+        loss_fn: nn.Module,
+    ) -> tuple[float, np.ndarray]:
         assert self.model is not None
         self.model.eval()
         running_loss = 0.0
         total_examples = 0
+        outputs = []
         with torch.no_grad():
             for batch in dataloader:
                 labels = batch.pop("labels").to(self.device)
@@ -388,7 +471,12 @@ class HybridCodeBERTGNNMultilabelBaseline:
                 batch_size = labels.size(0)
                 running_loss += loss.item() * batch_size
                 total_examples += batch_size
-        return running_loss / max(total_examples, 1)
+                outputs.append(torch.sigmoid(logits).cpu().numpy())
+        if outputs:
+            y_prob = np.vstack(outputs).astype(np.float32)
+        else:
+            y_prob = np.zeros((0, self.model.num_labels), dtype=np.float32)
+        return running_loss / max(total_examples, 1), y_prob
 
     def predict_proba(self, records: list[dict]) -> np.ndarray:
         assert self.model is not None
@@ -433,6 +521,19 @@ class HybridCodeBERTGNNMultilabelBaseline:
             "attention_heads": self.attention_heads,
             "graph_residual_scale": self.graph_residual_scale,
             "dropout": self.dropout,
+            "transformer_learning_rate": self.transformer_learning_rate,
+            "head_learning_rate": self.head_learning_rate,
+            "weight_decay": self.weight_decay,
+            "epochs": self.epochs,
+            "max_pos_weight": self.max_pos_weight,
+            "grad_clip_norm": self.grad_clip_norm,
+            "gradient_accumulation_steps": self.gradient_accumulation_steps,
+            "encoder_warmup_epochs": self.encoder_warmup_epochs,
+            "checkpoint_metric": self.checkpoint_metric,
+            "selection_candidate_thresholds": self.selection_candidate_thresholds,
+            "selection_default_threshold": self.selection_default_threshold,
+            "selection_threshold_min_support": self.selection_threshold_min_support,
+            "selection_threshold_min_precision": self.selection_threshold_min_precision,
             "num_labels": self.model.num_labels,
         }
         (output_path / "hybrid_config.json").write_text(json.dumps(metadata, indent=2), encoding="utf-8")
