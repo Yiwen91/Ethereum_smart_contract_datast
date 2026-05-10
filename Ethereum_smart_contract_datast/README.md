@@ -313,6 +313,16 @@ Or use the helper batch file:
 run_dataset2_smartbugs.bat
 ```
 
+That helper now also regenerates the SmartBugs experiment splits at:
+
+- `experiment_splits\smartbugs_secondary`
+
+If you want only the split-generation workflow without running any training, call:
+
+```cmd
+prepare_smartbugs_secondary_splits.bat
+```
+
 Inspect one SmartBugs contract:
 
 ```cmd
@@ -320,6 +330,42 @@ inspect_dataset2_smartbugs_contract.bat smartbugs_wild\contracts\<contract>.sol
 ```
 
 `smartbugs-wild` is already published as a curated benchmark dataset with duplicates removed, so the secondary workflow skips validation and dedup for the full run to reduce runtime while preserving the source dataset layout.
+
+### SmartBugs Tuning Recipes
+
+Use the secondary split directory for all SmartBugs ablations:
+
+```cmd
+--split-dir experiment_splits\smartbugs_secondary
+```
+
+Recommended best-per-model strategy under a practical Colab budget:
+
+- `CodeBERT`: tune at larger scale because semantic-only training transfers best and avoids graph-extraction overhead
+- `GNN`: tune at reduced scale with small graph budgets
+- `Hybrid`: tune at reduced scale and focus on fusion/calibration rather than large graph growth
+
+Recommended `CodeBERT` SmartBugs run:
+
+```cmd
+py train_experiment.py --model codebert --codebert-model-name microsoft/codebert-base --split-dir experiment_splits\smartbugs_secondary --output-dir experiments\codebert_baseline --run-name smartbugs_codebert_tuned_100k --max-train-samples 100000 --max-val-samples 10000 --max-test-samples 10000 --sample-strategy reservoir --epochs 4 --train-batch-size 8 --eval-batch-size 8 --max-length 192 --learning-rate 1.5e-5 --weight-decay 0.01 --max-pos-weight 8 --grad-clip-norm 1.0 --default-threshold 0.5 --threshold-min-support 5 --threshold-min-precision 0.10 --threshold-candidates 0.2 0.25 0.3 0.35 0.4 0.45 0.5 0.55 0.6 0.65 0.7 --save-model
+```
+
+Recommended reduced-scale `GNN` SmartBugs run:
+
+```cmd
+py train_experiment.py --model gnn --split-dir experiment_splits\smartbugs_secondary --output-dir experiments\gnn_baseline --run-name smartbugs_gnn_tuned_5k --max-train-samples 5000 --max-val-samples 500 --max-test-samples 500 --sample-strategy reservoir --gnn-epochs 3 --gnn-max-nodes 48 --gnn-feature-dim 256 --gnn-hidden-dim 160 --gnn-num-layers 2 --gnn-dropout 0.10 --gnn-train-batch-size 4 --gnn-eval-batch-size 8 --gnn-learning-rate 7e-4 --gnn-weight-decay 1e-4 --gnn-max-pos-weight 8 --gnn-grad-clip-norm 1.0 --default-threshold 0.5 --threshold-min-support 3 --threshold-min-precision 0.10 --threshold-candidates 0.2 0.25 0.3 0.35 0.4 0.45 0.5 0.55 0.6
+```
+
+Recommended reduced-scale `Hybrid` SmartBugs run:
+
+```cmd
+py train_experiment.py --model hybrid --codebert-model-name microsoft/codebert-base --split-dir experiment_splits\smartbugs_secondary --output-dir experiments\hybrid_baseline --run-name smartbugs_hybrid_tuned_5k --max-train-samples 5000 --max-val-samples 500 --max-test-samples 500 --sample-strategy reservoir --hybrid-epochs 3 --hybrid-train-batch-size 1 --hybrid-eval-batch-size 2 --max-length 128 --hybrid-max-nodes 48 --hybrid-feature-dim 256 --hybrid-graph-hidden-dim 128 --hybrid-graph-num-layers 2 --hybrid-fusion-dim 256 --hybrid-attention-heads 4 --hybrid-graph-residual-scale 0.08 --hybrid-dropout 0.15 --hybrid-transformer-learning-rate 1e-5 --hybrid-head-learning-rate 3e-4 --hybrid-weight-decay 0.01 --hybrid-max-pos-weight 10 --hybrid-grad-clip-norm 1.0 --hybrid-gradient-accumulation-steps 4 --hybrid-encoder-warmup-epochs 1 --hybrid-checkpoint-metric weighted_f1 --default-threshold 0.5 --threshold-min-support 3 --threshold-min-precision 0.0 --threshold-candidates 0.2 0.25 0.3 0.35 0.4 0.45 0.5 0.55 0.6 0.65 0.7
+```
+
+For a more detailed SmartBugs tuning workflow and thesis reporting notes, see:
+
+- `thesis_md/smartbugs_tuning_playbook.md`
 
 ### Side-By-Side Commands
 
