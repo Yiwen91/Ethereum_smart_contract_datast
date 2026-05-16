@@ -20,7 +20,7 @@ from pathlib import Path
 
 import numpy as np
 
-from experiment_utils import VULN_TYPES
+from experiment_utils import VULN_TYPES, resolve_contract_path
 
 # Slither check names (partial) -> project vulnerability label
 SLITHER_CHECK_TO_VULN: dict[str, str] = {
@@ -131,6 +131,12 @@ class SlitherDetectorMultilabelBaseline:
         self.default_probability = float(default_probability)
         self._contract_cache: dict[str, dict[str, set[int]]] = {}
         self.label_to_index = {label: idx for idx, label in enumerate(VULN_TYPES)}
+        self._stats = {
+            "records": 0,
+            "missing_contract": 0,
+            "unique_contracts_analyzed": 0,
+            "slither_errors": 0,
+        }
 
     def fit(self, train_records: list[dict], train_labels: np.ndarray | None = None):
         return self
@@ -173,17 +179,27 @@ class SlitherDetectorMultilabelBaseline:
                     vuln_lines[label].update(line_numbers)
         return dict(vuln_lines)
 
+    def _resolve_contract_file(self, contract_file: str) -> str | None:
+        path = resolve_contract_path(contract_file)
+        if path is None:
+            return None
+        return str(path.resolve())
+
     def _contract_findings(self, contract_file: str) -> dict[str, set[int]]:
-        resolved = str(Path(contract_file).resolve())
-        if resolved not in self._contract_cache:
+        resolved_path = self._resolve_contract_file(contract_file)
+        if resolved_path is None:
+            return {}
+        if resolved_path not in self._contract_cache:
             try:
-                self._contract_cache[resolved] = self._run_slither_on_contract(resolved)
+                self._contract_cache[resolved_path] = self._run_slither_on_contract(resolved_path)
+                self._stats["unique_contracts_analyzed"] += 1
             except Exception as exc:
                 if self.fail_on_compile_error:
                     raise
+                self._stats["slither_errors"] += 1
                 print(f"[slither] Skipping {contract_file}: {exc}")
-                self._contract_cache[resolved] = {}
-        return self._contract_cache[resolved]
+                self._contract_cache[resolved_path] = {}
+        return self._contract_cache[resolved_path]
 
     def _function_hit(
         self,
@@ -207,10 +223,24 @@ class SlitherDetectorMultilabelBaseline:
         if not records:
             return np.zeros((0, len(VULN_TYPES)), dtype=np.float32)
         outputs = np.zeros((len(records), len(VULN_TYPES)), dtype=np.float32)
+        self._stats = {
+            "records": len(records),
+            "missing_contract": 0,
+            "unique_contracts_analyzed": 0,
+            "slither_errors": 0,
+        }
         for idx, record in enumerate(records):
             contract_file = str(record.get("contract_file", ""))
-            if not contract_file or not Path(contract_file).exists():
+            if not contract_file or self._resolve_contract_file(contract_file) is None:
+                self._stats["missing_contract"] += 1
                 continue
             vuln_lines = self._contract_findings(contract_file)
             outputs[idx] = self._function_hit(record, vuln_lines)
+        print(
+            "[slither] predict_proba stats: "
+            f"records={self._stats['records']} "
+            f"missing_contract={self._stats['missing_contract']} "
+            f"unique_contracts_analyzed={self._stats['unique_contracts_analyzed']} "
+            f"slither_errors={self._stats['slither_errors']}"
+        )
         return outputs

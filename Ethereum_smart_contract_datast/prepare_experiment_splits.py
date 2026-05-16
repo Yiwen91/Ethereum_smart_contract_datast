@@ -20,7 +20,22 @@ import random
 from collections import defaultdict
 from pathlib import Path
 
+from experiment_utils import CONTRACT_PATH_MARKERS
+from experiment_utils import CONTRACT_PATH_MARKERS
 from report_vulnerability_counts import VULN_TYPES, load_functions_from_json
+
+
+def _portable_contract_path(contract_file: str, project_root: Path) -> str:
+    path = Path(contract_file)
+    try:
+        return path.resolve().relative_to(project_root.resolve()).as_posix()
+    except ValueError:
+        normalized = str(contract_file).replace("\\", "/")
+        for marker in CONTRACT_PATH_MARKERS:
+            if marker in normalized:
+                suffix = normalized.split(marker, 1)[1].lstrip("/")
+                return f"{marker}/{suffix}"
+        return normalized
 
 
 def _group_functions_by_contract(functions: list) -> dict[str, list]:
@@ -203,6 +218,7 @@ def _write_split_json(
     split_name: str,
     seed: int,
     ratios: dict[str, float],
+    project_root: Path,
 ):
     payload = {
         "metadata": {
@@ -217,7 +233,7 @@ def _write_split_json(
         },
         "functions": [
             {
-                "contract_file": fn.contract_file,
+                "contract_file": _portable_contract_path(fn.contract_file, project_root),
                 "contract_name": fn.contract_name,
                 "function_name": fn.function_name,
                 "function_signature": fn.function_signature,
@@ -265,6 +281,7 @@ def create_splits(
 
     out_dir = Path(output_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
+    project_root = Path(__file__).resolve().parent
 
     for split_name in ("train", "val", "test"):
         contracts_file = out_dir / f"{split_name}_contracts.txt"
@@ -279,6 +296,7 @@ def create_splits(
             split_name=split_name,
             seed=seed,
             ratios=ratios,
+            project_root=project_root,
         )
 
     manifest = {

@@ -49,7 +49,15 @@ def _split_path(split_dir: str | Path, name: str) -> Path:
     return Path(split_dir) / f"{name}.json"
 
 
+def _project_root(args) -> Path:
+    if getattr(args, "contract_root", None):
+        return Path(args.contract_root).resolve()
+    return Path.cwd().resolve()
+
+
 def _load_splits(args) -> tuple[LoadedSplit, LoadedSplit, LoadedSplit]:
+    project_root = _project_root(args)
+    print(f"[load] Project root for contract paths: {project_root}")
     print("[load] Reading train split...")
     train_split = load_named_split(
         "train",
@@ -57,6 +65,7 @@ def _load_splits(args) -> tuple[LoadedSplit, LoadedSplit, LoadedSplit]:
         max_samples=args.max_train_samples,
         seed=args.seed,
         sample_strategy=args.sample_strategy,
+        project_root=project_root,
     )
     print("[load] Reading validation split...")
     val_split = load_named_split(
@@ -65,6 +74,7 @@ def _load_splits(args) -> tuple[LoadedSplit, LoadedSplit, LoadedSplit]:
         max_samples=args.max_val_samples,
         seed=args.seed + 1,
         sample_strategy=args.sample_strategy,
+        project_root=project_root,
     )
     print("[load] Reading test split...")
     test_split = load_named_split(
@@ -73,6 +83,7 @@ def _load_splits(args) -> tuple[LoadedSplit, LoadedSplit, LoadedSplit]:
         max_samples=args.max_test_samples,
         seed=args.seed + 2,
         sample_strategy=args.sample_strategy,
+        project_root=project_root,
     )
     return train_split, val_split, test_split
 
@@ -86,6 +97,7 @@ def _config_from_args(args) -> dict:
         "max_val_samples": args.max_val_samples,
         "max_test_samples": args.max_test_samples,
         "sample_strategy": args.sample_strategy,
+        "contract_root": str(_project_root(args)),
     }
     if args.model == "tabular":
         config.update(
@@ -872,6 +884,10 @@ def build_parser() -> argparse.ArgumentParser:
         choices=["reservoir", "head"],
         default="reservoir",
         help="How to sample examples when max sample limits are set.",
+    )
+    parser.add_argument(
+        "--contract-root",
+        help="Project root used to resolve contract_file paths in split JSON (default: cwd).",
     )
     parser.add_argument("--default-threshold", type=float, default=0.5)
     parser.add_argument("--threshold-min-support", type=int, default=5)

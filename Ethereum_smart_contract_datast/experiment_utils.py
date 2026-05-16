@@ -30,6 +30,106 @@ class LoadedSplit:
     labels: np.ndarray
 
 
+# Dataset directory markers stored in split JSON (absolute or relative paths).
+CONTRACT_PATH_MARKERS: tuple[str, ...] = (
+    "contract_dataset_ethereum",
+    "smartbugs_wild/contracts",
+    "smartbugs_wild",
+)
+
+
+def resolve_contract_path(
+    contract_file: str,
+    *,
+    project_root: Path | str | None = None,
+    extra_roots: Iterable[Path | str] | None = None,
+) -> Path | None:
+    """
+    Resolve a contract_file path from split JSON to a local .sol file.
+
+    Split files created on Windows often store absolute paths that do not exist
+    on Colab/Linux. This helper re-anchors paths under project_root using known
+    dataset folder markers (e.g. contract_dataset_ethereum/contract13/0.sol).
+    """
+    if not contract_file or not str(contract_file).strip():
+        return None
+
+    raw = Path(contract_file)
+    if raw.is_file():
+        return raw.resolve()
+
+    project_root = Path(project_root or Path.cwd())
+    search_roots: list[Path] = [project_root]
+    if extra_roots:
+        search_roots.extend(Path(root) for root in extra_roots)
+
+    normalized = str(contract_file).replace("\\", "/")
+    for marker in CONTRACT_PATH_MARKERS:
+        if marker not in normalized:
+            continue
+        rel_suffix = normalized.split(marker, 1)[1].lstrip("/")
+        for root in search_roots:
+            candidate = root / marker / rel_suffix
+            if candidate.is_file():
+                return candidate.resolve()
+
+    basename = raw.name
+    if basename.endswith(".sol"):
+        for marker in CONTRACT_PATH_MARKERS:
+            for root in search_roots:
+                base = root / marker
+                if not base.is_dir():
+                    continue
+                matches = list(base.glob(f"**/{basename}"))
+                if len(matches) == 1:
+                    return matches[0].resolve()
+
+    return None
+
+
+def normalize_record_contract_paths(
+    records: list[dict],
+    *,
+    project_root: Path | str | None = None,
+    split_name: str | None = None,
+) -> dict[str, int]:
+    """
+    Rewrite record contract_file entries to resolved local paths when possible.
+
+    Returns counts: resolved, missing, unchanged.
+    """
+    root = Path(project_root or Path.cwd())
+    resolved_count = 0
+    missing_count = 0
+    unchanged_count = 0
+
+    for record in records:
+        raw = str(record.get("contract_file", ""))
+        if not raw:
+            missing_count += 1
+            continue
+        if Path(raw).is_file():
+            unchanged_count += 1
+            continue
+        candidate = resolve_contract_path(raw, project_root=root)
+        if candidate is not None:
+            record["contract_file"] = str(candidate)
+            resolved_count += 1
+        else:
+            missing_count += 1
+
+    prefix = f"[paths] {split_name}" if split_name else "[paths]"
+    print(
+        f"{prefix}: resolved={resolved_count} unchanged={unchanged_count} "
+        f"missing={missing_count} (project_root={root})"
+    )
+    return {
+        "resolved": resolved_count,
+        "unchanged": unchanged_count,
+        "missing": missing_count,
+    }
+
+
 def load_split_manifest(path: str | Path) -> dict:
     return json.loads(Path(path).read_text(encoding="utf-8"))
 
@@ -99,6 +199,8 @@ def load_named_split(
     max_samples: int | None = None,
     seed: int = 42,
     sample_strategy: str = "reservoir",
+    project_root: Path | str | None = None,
+    normalize_contract_paths: bool = True,
 ) -> LoadedSplit:
     label_order = label_order or list(VULN_TYPES)
     records = load_split_records(
@@ -107,6 +209,8 @@ def load_named_split(
         seed=seed,
         sample_strategy=sample_strategy,
     )
+    if normalize_contract_paths:
+        normalize_record_contract_paths(records, project_root=project_root, split_name=name)
     texts = [record.get("function_code", "") for record in records]
     labels = np.asarray(
         [encode_vulnerabilities(record.get("vulnerabilities", []), label_order) for record in records],
