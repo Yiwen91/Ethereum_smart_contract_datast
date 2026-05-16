@@ -13,105 +13,12 @@ CodeBERT, GNN, and Hybrid models via:
 
 from __future__ import annotations
 
-import inspect
-from collections import defaultdict
-from functools import lru_cache
 from pathlib import Path
 
 import numpy as np
 
 from experiment_utils import VULN_TYPES, resolve_contract_path
-
-# Slither check names (partial) -> project vulnerability label
-SLITHER_CHECK_TO_VULN: dict[str, str] = {
-    "reentrancy-eth": "Reentrancy",
-    "reentrancy-no-eth": "Reentrancy",
-    "reentrancy-benign": "Reentrancy",
-    "reentrancy-events": "Reentrancy",
-    "timestamp": "Timestamp Dependency",
-    "weak-prng": "Timestamp Dependency",
-    "incorrect-equality": "Timestamp Dependency",
-    "integer-overflow": "Integer Overflow/Underflow",
-    "incorrect-exp": "Integer Overflow/Underflow",
-    "divide-before-multiply": "Integer Overflow/Underflow",
-    "delegatecall": "Dangerous Delegatecall",
-    "controlled-delegatecall": "Dangerous Delegatecall",
-    "delegatecall-loop": "Dangerous Delegatecall",
-    "tx-origin": "Transaction-Ordering Dependence",
-    "suicidal": "Transaction-Ordering Dependence",
-    "arbitrary-send-eth": "Transaction-Ordering Dependence",
-    "arbitrary-send-erc20": "Transaction-Ordering Dependence",
-    "uninitialized-storage": "Uninitialized Storage Pointer",
-    "uninitialized-state": "Uninitialized Storage Pointer",
-    "unused-state": "Uninitialized Storage Pointer",
-    "unchecked-lowlevel": "Unchecked External Calls",
-    "unchecked-send": "Unchecked External Calls",
-    "unchecked-transfer": "Unchecked External Calls",
-    "return-bomb": "Unchecked External Calls",
-    "low-level-calls": "Unchecked External Calls",
-}
-
-
-def _normalize_check_name(check: str) -> str:
-    return check.strip().lower().replace(" ", "-")
-
-
-def _finding_vuln_labels(check: str, description: str = "") -> list[str]:
-    normalized = _normalize_check_name(check)
-    if normalized in SLITHER_CHECK_TO_VULN:
-        return [SLITHER_CHECK_TO_VULN[normalized]]
-
-    description_lower = description.lower()
-    fallback: list[str] = []
-    if "reentranc" in description_lower:
-        fallback.append("Reentrancy")
-    if "timestamp" in description_lower or "block.timestamp" in description_lower:
-        fallback.append("Timestamp Dependency")
-    if "overflow" in description_lower or "underflow" in description_lower:
-        fallback.append("Integer Overflow/Underflow")
-    if "delegatecall" in description_lower:
-        fallback.append("Dangerous Delegatecall")
-    if "tx.origin" in description_lower or "transaction-order" in description_lower:
-        fallback.append("Transaction-Ordering Dependence")
-    if "uninitialized" in description_lower and "storage" in description_lower:
-        fallback.append("Uninitialized Storage Pointer")
-    if "unchecked" in description_lower or "return value" in description_lower:
-        fallback.append("Unchecked External Calls")
-    return fallback
-
-
-@lru_cache(maxsize=1)
-def _all_slither_detector_classes() -> tuple[type, ...]:
-    from slither.detectors import all_detectors
-    from slither.detectors.abstract_detector import AbstractDetector
-
-    detectors = [
-        getattr(all_detectors, name)
-        for name in dir(all_detectors)
-        if inspect.isclass(getattr(all_detectors, name))
-        and issubclass(getattr(all_detectors, name), AbstractDetector)
-    ]
-    return tuple(detectors)
-
-
-def _element_line_numbers(element) -> set[int]:
-    if isinstance(element, dict):
-        source_mapping = element.get("source_mapping") or {}
-        if isinstance(source_mapping, dict):
-            lines = source_mapping.get("lines") or []
-        else:
-            lines = getattr(source_mapping, "lines", None) or []
-    else:
-        source_mapping = getattr(element, "source_mapping", None)
-        lines = getattr(source_mapping, "lines", None) or [] if source_mapping else []
-
-    line_numbers: set[int] = set()
-    for line in lines:
-        try:
-            line_numbers.add(int(line))
-        except (TypeError, ValueError):
-            continue
-    return line_numbers
+from slither_labeling import SlitherFunctionLabeler, label_function_from_vuln_lines
 
 
 class SlitherDetectorMultilabelBaseline:
@@ -126,58 +33,18 @@ class SlitherDetectorMultilabelBaseline:
         fail_on_compile_error: bool = False,
         default_probability: float = 1.0,
     ):
-        self.detectors = detectors
-        self.fail_on_compile_error = fail_on_compile_error
         self.default_probability = float(default_probability)
-        self._contract_cache: dict[str, dict[str, set[int]]] = {}
-        self.label_to_index = {label: idx for idx, label in enumerate(VULN_TYPES)}
-        self._stats = {
+        self._labeler = SlitherFunctionLabeler(
+            detector_filter=detectors,
+            fail_on_compile_error=fail_on_compile_error,
+        )
+        self._predict_stats = {
             "records": 0,
             "missing_contract": 0,
-            "unique_contracts_analyzed": 0,
-            "slither_errors": 0,
         }
 
     def fit(self, train_records: list[dict], train_labels: np.ndarray | None = None):
         return self
-
-    def _run_slither_on_contract(self, contract_file: str) -> dict[str, set[int]]:
-        """
-        Returns mapping vulnerability_label -> set of source line numbers with hits.
-        """
-        from slither import Slither
-
-        slither = Slither(contract_file)
-        detector_classes = _all_slither_detector_classes()
-        if self.detectors:
-            allowed = {name.strip().lower() for name in self.detectors}
-            detector_classes = tuple(
-                detector
-                for detector in detector_classes
-                if getattr(detector, "ARGUMENT", "").lower() in allowed
-            )
-        for detector_cls in detector_classes:
-            slither.register_detector(detector_cls)
-
-        raw_results = slither.run_detectors()
-        findings = [
-            item for sublist in raw_results if sublist for item in sublist if isinstance(item, dict)
-        ]
-
-        vuln_lines: dict[str, set[int]] = defaultdict(set)
-        for result in findings:
-            check = str(result.get("check", "") or "")
-            description = str(result.get("description", "") or "")
-            labels = _finding_vuln_labels(check, description)
-            line_numbers: set[int] = set()
-            for element in result.get("elements", []) or []:
-                line_numbers.update(_element_line_numbers(element))
-            if not line_numbers or not labels:
-                continue
-            for label in labels:
-                if label in self.label_to_index:
-                    vuln_lines[label].update(line_numbers)
-        return dict(vuln_lines)
 
     def _resolve_contract_file(self, contract_file: str) -> str | None:
         path = resolve_contract_path(contract_file, project_root=Path.cwd())
@@ -185,62 +52,34 @@ class SlitherDetectorMultilabelBaseline:
             return None
         return str(path.resolve())
 
-    def _contract_findings(self, contract_file: str) -> dict[str, set[int]]:
-        resolved_path = self._resolve_contract_file(contract_file)
-        if resolved_path is None:
-            return {}
-        if resolved_path not in self._contract_cache:
-            try:
-                self._contract_cache[resolved_path] = self._run_slither_on_contract(resolved_path)
-                self._stats["unique_contracts_analyzed"] += 1
-            except Exception as exc:
-                if self.fail_on_compile_error:
-                    raise
-                self._stats["slither_errors"] += 1
-                print(f"[slither] Skipping {contract_file}: {exc}")
-                self._contract_cache[resolved_path] = {}
-        return self._contract_cache[resolved_path]
-
-    def _function_hit(
-        self,
-        record: dict,
-        vuln_lines: dict[str, set[int]],
-    ) -> np.ndarray:
-        start_line = int(record.get("start_line", 0) or 0)
-        end_line = int(record.get("end_line", 0) or 0)
-        if end_line <= 0:
-            end_line = start_line
-        probs = np.zeros(len(VULN_TYPES), dtype=np.float32)
-        for label, lines in vuln_lines.items():
-            idx = self.label_to_index.get(label)
-            if idx is None:
-                continue
-            if any(start_line <= line <= end_line for line in lines):
-                probs[idx] = self.default_probability
-        return probs
-
     def predict_proba(self, records: list[dict]) -> np.ndarray:
         if not records:
             return np.zeros((0, len(VULN_TYPES)), dtype=np.float32)
         outputs = np.zeros((len(records), len(VULN_TYPES)), dtype=np.float32)
-        self._stats = {
-            "records": len(records),
-            "missing_contract": 0,
-            "unique_contracts_analyzed": 0,
-            "slither_errors": 0,
-        }
+        self._predict_stats = {"records": len(records), "missing_contract": 0}
+
         for idx, record in enumerate(records):
             contract_file = str(record.get("contract_file", ""))
-            if not contract_file or self._resolve_contract_file(contract_file) is None:
-                self._stats["missing_contract"] += 1
+            resolved = self._resolve_contract_file(contract_file) if contract_file else None
+            if resolved is None:
+                self._predict_stats["missing_contract"] += 1
                 continue
-            vuln_lines = self._contract_findings(contract_file)
-            outputs[idx] = self._function_hit(record, vuln_lines)
+
+            vuln_lines = self._labeler.contract_vulnerability_lines(resolved)
+            vulnerabilities = label_function_from_vuln_lines(
+                int(record.get("start_line", 0) or 0),
+                int(record.get("end_line", 0) or 0),
+                vuln_lines,
+            )
+            for label in vulnerabilities:
+                if label in VULN_TYPES:
+                    label_idx = VULN_TYPES.index(label)
+                    outputs[idx, label_idx] = self.default_probability
+
         print(
             "[slither] predict_proba stats: "
-            f"records={self._stats['records']} "
-            f"missing_contract={self._stats['missing_contract']} "
-            f"unique_contracts_analyzed={self._stats['unique_contracts_analyzed']} "
-            f"slither_errors={self._stats['slither_errors']}"
+            f"records={self._predict_stats['records']} "
+            f"missing_contract={self._predict_stats['missing_contract']} "
+            f"{self._labeler.format_stats()}"
         )
         return outputs

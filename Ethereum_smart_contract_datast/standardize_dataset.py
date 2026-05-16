@@ -537,13 +537,25 @@ class DatasetStandardizer:
         output_dir: str = "standardized_dataset",
         swc_mapping: Optional[Dict] = None,
         fallback_only: bool = False,
+        labeler: str = "heuristic",
+        slither_fail_on_compile_error: bool = False,
     ):
         self.output_dir = Path(output_dir)
         self.output_dir.mkdir(exist_ok=True)
         
+        self.labeler_mode = labeler
         self.swc_mapping = swc_mapping or load_swc_mapping()
         self.extractor = SlitherExtractor(fallback_only=fallback_only)
         self.labeler = VulnerabilityLabeler()
+        self.slither_labeler = None
+        if self.labeler_mode == "slither":
+            from slither_labeling import SlitherFunctionLabeler
+
+            self.slither_labeler = SlitherFunctionLabeler(
+                fail_on_compile_error=slither_fail_on_compile_error,
+            )
+        elif self.labeler_mode != "heuristic":
+            raise ValueError(f"Unsupported labeler mode: {self.labeler_mode}")
         
         self.all_functions: List[FunctionData] = []
     
@@ -556,16 +568,27 @@ class DatasetStandardizer:
         extracted_functions = self.extractor.extract_functions(sol_file)
         
         for func in extracted_functions:
-            # Label vulnerabilities (pass sol_version to skip integer overflow for 0.8+)
-            vulnerabilities, labels = self.labeler.label_function(func['code'], sol_version=sol_version)
-            
-            # Map to SWC IDs
+            metadata: Dict = {}
+            if self.labeler_mode == "slither":
+                assert self.slither_labeler is not None
+                vulnerabilities, labels = self.slither_labeler.label_function(
+                    start_line=int(func["start_line"]),
+                    end_line=int(func["end_line"]),
+                    contract_file=sol_file,
+                )
+                metadata["labeling_source"] = "slither"
+            else:
+                vulnerabilities, labels = self.labeler.label_function(
+                    func["code"],
+                    sol_version=sol_version,
+                )
+                metadata["labeling_source"] = "heuristic"
+
             swc_ids = []
             for vuln in vulnerabilities:
                 if vuln in self.swc_mapping:
-                    swc_ids.append(self.swc_mapping[vuln]['swc_id'])
-            
-            # Create FunctionData object
+                    swc_ids.append(self.swc_mapping[vuln]["swc_id"])
+
             func_data = FunctionData(
                 contract_file=sol_file,
                 contract_name=func['contract_name'],
@@ -579,7 +602,7 @@ class DatasetStandardizer:
                 vulnerabilities=vulnerabilities,
                 swc_ids=swc_ids,
                 labels=labels,
-                metadata={}
+                metadata=metadata,
             )
             
             functions_data.append(func_data)
@@ -640,6 +663,9 @@ class DatasetStandardizer:
             except Exception as e:
                 print(f"Error processing {sol_file}: {e}")
                 continue
+
+        if self.labeler_mode == "slither" and self.slither_labeler is not None:
+            print(f"[slither-label] Finished. {self.slither_labeler.format_stats()}")
     
     def export_json(self, filename: str = "standardized_dataset.json"):
         """Export to JSON format"""
@@ -649,7 +675,8 @@ class DatasetStandardizer:
             'metadata': {
                 'total_functions': len(self.all_functions),
                 'swc_mapping': self.swc_mapping,
-                'format_version': '1.0'
+                'format_version': '1.0',
+                'labeler': self.labeler_mode,
             },
             'functions': [asdict(func) for func in self.all_functions]
         }
@@ -760,13 +787,32 @@ def main():
         action='store_true',
         help='Skip Slither and use regex-based function extraction only'
     )
+    parser.add_argument(
+        '--labeler',
+        choices=['heuristic', 'slither'],
+        default='heuristic',
+        help='Labeling strategy: heuristic rules (LABELING_RULES.md) or slither detectors only.',
+    )
+    parser.add_argument(
+        '--slither-fail-on-compile-error',
+        action='store_true',
+        help='Abort Slither-only labeling when a contract fails to compile.',
+    )
     
     args = parser.parse_args()
+
+    if args.labeler == 'slither' and args.fallback_only:
+        print(
+            "Warning: --labeler slither with --fallback-only uses regex extraction; "
+            "Slither labeling still requires successful compilation per file."
+        )
     
     # Create standardizer
     standardizer = DatasetStandardizer(
         output_dir=args.output_dir,
         fallback_only=args.fallback_only,
+        labeler=args.labeler,
+        slither_fail_on_compile_error=args.slither_fail_on_compile_error,
     )
     
     # Process directory
