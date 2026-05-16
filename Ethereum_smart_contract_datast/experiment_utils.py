@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 import random
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable
@@ -37,12 +38,68 @@ CONTRACT_PATH_MARKERS: tuple[str, ...] = (
     "smartbugs_wild",
 )
 
+_CONTRACT_REL_PATTERN = re.compile(r"(contract\d+[/\\][^/\\]+\.sol)\s*$", re.IGNORECASE)
+
+
+def _contract_relative_suffix(contract_file: str) -> tuple[str, str] | None:
+    """
+    Return (marker, relative_suffix) such as
+    ("contract_dataset_ethereum", "contract13/12479.sol").
+    """
+    normalized = str(contract_file).replace("\\", "/")
+    for marker in CONTRACT_PATH_MARKERS:
+        if marker not in normalized:
+            continue
+        rel_suffix = normalized.split(marker, 1)[1].lstrip("/")
+        if rel_suffix:
+            return marker, rel_suffix
+
+    match = _CONTRACT_REL_PATTERN.search(normalized)
+    if match:
+        rel_suffix = match.group(1).replace("\\", "/")
+        return "contract_dataset_ethereum", rel_suffix
+    return None
+
+
+def discover_contract_search_roots(
+    project_root: Path | str | None = None,
+    *,
+    contracts_dir: Path | str | None = None,
+) -> list[Path]:
+    """Candidate directories for resolving split JSON contract_file paths."""
+    root = Path(project_root or Path.cwd()).resolve()
+    roots: list[Path] = [root, root.parent]
+
+    if contracts_dir:
+        dataset_path = Path(contracts_dir).resolve()
+        roots.append(dataset_path)
+        if dataset_path.name in CONTRACT_PATH_MARKERS or dataset_path.name == "contracts":
+            roots.append(dataset_path.parent)
+        else:
+            for marker in CONTRACT_PATH_MARKERS:
+                roots.append(dataset_path / marker)
+
+    for marker in CONTRACT_PATH_MARKERS:
+        roots.append(root / marker)
+        roots.append(root.parent / marker)
+
+    deduped: list[Path] = []
+    seen: set[str] = set()
+    for candidate in roots:
+        key = str(candidate)
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(candidate)
+    return deduped
+
 
 def resolve_contract_path(
     contract_file: str,
     *,
     project_root: Path | str | None = None,
     extra_roots: Iterable[Path | str] | None = None,
+    contracts_dir: Path | str | None = None,
 ) -> Path | None:
     """
     Resolve a contract_file path from split JSON to a local .sol file.
@@ -59,9 +116,27 @@ def resolve_contract_path(
         return raw.resolve()
 
     project_root = Path(project_root or Path.cwd())
-    search_roots: list[Path] = [project_root]
+    search_roots = discover_contract_search_roots(project_root, contracts_dir=contracts_dir)
     if extra_roots:
-        search_roots.extend(Path(root) for root in extra_roots)
+        search_roots = list(search_roots) + [Path(root) for root in extra_roots]
+
+    parsed = _contract_relative_suffix(contract_file)
+    if parsed is not None:
+        marker, rel_suffix = parsed
+        for root in search_roots:
+            candidates = [
+                root / marker / rel_suffix,
+                root / rel_suffix,
+            ]
+            if contracts_dir:
+                dataset_root = Path(contracts_dir).resolve()
+                if dataset_root.name == marker:
+                    candidates.insert(0, dataset_root / rel_suffix)
+                else:
+                    candidates.insert(0, dataset_root / rel_suffix)
+            for candidate in candidates:
+                if candidate.is_file():
+                    return candidate.resolve()
 
     normalized = str(contract_file).replace("\\", "/")
     for marker in CONTRACT_PATH_MARKERS:
@@ -87,10 +162,49 @@ def resolve_contract_path(
     return None
 
 
+def _print_contract_path_help(
+    records: list[dict],
+    *,
+    project_root: Path,
+    contracts_dir: Path | str | None,
+) -> None:
+    sample_raw = ""
+    for record in records:
+        sample_raw = str(record.get("contract_file", ""))
+        if sample_raw:
+            break
+    if not sample_raw:
+        return
+
+    parsed = _contract_relative_suffix(sample_raw)
+    expected = None
+    if parsed is not None:
+        marker, rel_suffix = parsed
+        expected = project_root / marker / rel_suffix
+
+    dataset_root = project_root / "contract_dataset_ethereum"
+    if contracts_dir:
+        dataset_root = Path(contracts_dir)
+
+    print("[paths] ERROR: No contract .sol files were resolved.")
+    print(f"[paths]   project_root={project_root}")
+    print(f"[paths]   contracts_dir={contracts_dir or '(not set)'}")
+    print(f"[paths]   contract_dataset_ethereum exists={dataset_root.is_dir()}")
+    print(f"[paths]   sample split path={sample_raw[:160]}")
+    if expected is not None:
+        print(f"[paths]   expected local file={expected}")
+        print(f"[paths]   expected exists={expected.is_file()}")
+    print(
+        "[paths]   Fix: upload/unzip contract_dataset_ethereum into the project root, "
+        "or rerun with --contracts-dir /path/to/contract_dataset_ethereum"
+    )
+
+
 def normalize_record_contract_paths(
     records: list[dict],
     *,
     project_root: Path | str | None = None,
+    contracts_dir: Path | str | None = None,
     split_name: str | None = None,
 ) -> dict[str, int]:
     """
@@ -111,7 +225,11 @@ def normalize_record_contract_paths(
         if Path(raw).is_file():
             unchanged_count += 1
             continue
-        candidate = resolve_contract_path(raw, project_root=root)
+        candidate = resolve_contract_path(
+            raw,
+            project_root=root,
+            contracts_dir=contracts_dir,
+        )
         if candidate is not None:
             record["contract_file"] = str(candidate)
             resolved_count += 1
@@ -123,6 +241,8 @@ def normalize_record_contract_paths(
         f"{prefix}: resolved={resolved_count} unchanged={unchanged_count} "
         f"missing={missing_count} (project_root={root})"
     )
+    if records and resolved_count == 0 and unchanged_count == 0 and missing_count == len(records):
+        _print_contract_path_help(records, project_root=root, contracts_dir=contracts_dir)
     return {
         "resolved": resolved_count,
         "unchanged": unchanged_count,
@@ -200,6 +320,7 @@ def load_named_split(
     seed: int = 42,
     sample_strategy: str = "reservoir",
     project_root: Path | str | None = None,
+    contracts_dir: Path | str | None = None,
     normalize_contract_paths: bool = True,
 ) -> LoadedSplit:
     label_order = label_order or list(VULN_TYPES)
@@ -210,7 +331,12 @@ def load_named_split(
         sample_strategy=sample_strategy,
     )
     if normalize_contract_paths:
-        normalize_record_contract_paths(records, project_root=project_root, split_name=name)
+        normalize_record_contract_paths(
+            records,
+            project_root=project_root,
+            contracts_dir=contracts_dir,
+            split_name=name,
+        )
     texts = [record.get("function_code", "") for record in records]
     labels = np.asarray(
         [encode_vulnerabilities(record.get("vulnerabilities", []), label_order) for record in records],

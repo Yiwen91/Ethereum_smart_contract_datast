@@ -180,7 +180,7 @@ class SlitherDetectorMultilabelBaseline:
         return dict(vuln_lines)
 
     def _resolve_contract_file(self, contract_file: str) -> str | None:
-        path = resolve_contract_path(contract_file)
+        path = resolve_contract_path(contract_file, project_root=Path.cwd())
         if path is None:
             return None
         return str(path.resolve())

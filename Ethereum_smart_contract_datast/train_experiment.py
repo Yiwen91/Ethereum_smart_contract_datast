@@ -55,9 +55,18 @@ def _project_root(args) -> Path:
     return Path.cwd().resolve()
 
 
+def _contracts_dir(args) -> Path | None:
+    if getattr(args, "contracts_dir", None):
+        return Path(args.contracts_dir).resolve()
+    return None
+
+
 def _load_splits(args) -> tuple[LoadedSplit, LoadedSplit, LoadedSplit]:
     project_root = _project_root(args)
+    contracts_dir = _contracts_dir(args)
     print(f"[load] Project root for contract paths: {project_root}")
+    if contracts_dir:
+        print(f"[load] Contracts directory override: {contracts_dir}")
     print("[load] Reading train split...")
     train_split = load_named_split(
         "train",
@@ -66,6 +75,7 @@ def _load_splits(args) -> tuple[LoadedSplit, LoadedSplit, LoadedSplit]:
         seed=args.seed,
         sample_strategy=args.sample_strategy,
         project_root=project_root,
+        contracts_dir=contracts_dir,
     )
     print("[load] Reading validation split...")
     val_split = load_named_split(
@@ -75,6 +85,7 @@ def _load_splits(args) -> tuple[LoadedSplit, LoadedSplit, LoadedSplit]:
         seed=args.seed + 1,
         sample_strategy=args.sample_strategy,
         project_root=project_root,
+        contracts_dir=contracts_dir,
     )
     print("[load] Reading test split...")
     test_split = load_named_split(
@@ -84,6 +95,7 @@ def _load_splits(args) -> tuple[LoadedSplit, LoadedSplit, LoadedSplit]:
         seed=args.seed + 2,
         sample_strategy=args.sample_strategy,
         project_root=project_root,
+        contracts_dir=contracts_dir,
     )
     return train_split, val_split, test_split
 
@@ -98,6 +110,7 @@ def _config_from_args(args) -> dict:
         "max_test_samples": args.max_test_samples,
         "sample_strategy": args.sample_strategy,
         "contract_root": str(_project_root(args)),
+        "contracts_dir": str(_contracts_dir(args)) if _contracts_dir(args) else None,
     }
     if args.model == "tabular":
         config.update(
@@ -498,6 +511,17 @@ def run_slither_experiment(args) -> Path:
     train_split, val_split, test_split = _load_splits(args)
 
     print("[slither] Running Slither detector baseline (no training)...")
+    missing_val = sum(
+        1
+        for record in val_split.records
+        if not Path(str(record.get("contract_file", ""))).is_file()
+    )
+    if missing_val == len(val_split.records) and len(val_split.records) > 0:
+        raise FileNotFoundError(
+            "No .sol files resolved for the validation split. "
+            "Upload contract_dataset_ethereum to the project root or pass "
+            "--contracts-dir /path/to/contract_dataset_ethereum"
+        )
     model = SlitherDetectorMultilabelBaseline(
         fail_on_compile_error=args.slither_fail_on_compile_error,
         default_probability=args.slither_default_probability,
@@ -888,6 +912,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--contract-root",
         help="Project root used to resolve contract_file paths in split JSON (default: cwd).",
+    )
+    parser.add_argument(
+        "--contracts-dir",
+        help="Path to contract_dataset_ethereum (or smartbugs_wild/contracts) if not under project root.",
     )
     parser.add_argument("--default-threshold", type=float, default=0.5)
     parser.add_argument("--threshold-min-support", type=int, default=5)
