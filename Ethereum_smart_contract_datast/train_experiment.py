@@ -27,6 +27,7 @@ from experiment_utils import (
 from models_codebert import CodeBERTMultilabelBaseline
 from models_gnn import ASTCFGFunctionGNNMultilabelBaseline
 from models_hybrid import HybridCodeBERTGNNMultilabelBaseline
+from models_slither_baseline import SlitherDetectorMultilabelBaseline
 from models_tabular import TabularMultilabelBaseline
 
 
@@ -130,6 +131,13 @@ def _config_from_args(args) -> dict:
                 "device": args.device,
             }
         )
+    elif args.model == "slither":
+        config.update(
+            {
+                "slither_fail_on_compile_error": args.slither_fail_on_compile_error,
+                "slither_default_probability": args.slither_default_probability,
+            }
+        )
     elif args.model == "hybrid":
         config.update(
             {
@@ -154,6 +162,9 @@ def _config_from_args(args) -> dict:
                 "hybrid_gradient_accumulation_steps": args.hybrid_gradient_accumulation_steps,
                 "hybrid_encoder_warmup_epochs": args.hybrid_encoder_warmup_epochs,
                 "hybrid_checkpoint_metric": args.hybrid_checkpoint_metric,
+                "hybrid_enable_cross_contract": args.hybrid_enable_cross_contract,
+                "hybrid_cross_contract_use_slither": args.hybrid_cross_contract_use_slither,
+                "hybrid_cross_contract_residual_scale": args.hybrid_cross_contract_residual_scale,
                 "device": args.device,
                 "save_model": args.save_model,
             }
@@ -470,6 +481,70 @@ def run_gnn_experiment(args) -> Path:
     return result
 
 
+def run_slither_experiment(args) -> Path:
+    run_dir = _ensure_run_dir(args.output_dir, args.run_name)
+    train_split, val_split, test_split = _load_splits(args)
+
+    print("[slither] Running Slither detector baseline (no training)...")
+    model = SlitherDetectorMultilabelBaseline(
+        fail_on_compile_error=args.slither_fail_on_compile_error,
+        default_probability=args.slither_default_probability,
+    )
+    model.fit(train_split.records, train_split.labels)
+
+    print("[eval] Selecting per-label thresholds on validation split...")
+    val_start = perf_counter()
+    val_prob = model.predict_proba(val_split.records)
+    val_inference_seconds = perf_counter() - val_start
+    thresholds = choose_thresholds(
+        val_split.labels,
+        val_prob,
+        label_order=VULN_TYPES,
+        candidate_thresholds=args.threshold_candidates,
+        default_threshold=args.default_threshold,
+        min_support=args.threshold_min_support,
+        min_precision=args.threshold_min_precision,
+    )
+    val_pred = apply_thresholds(val_prob, thresholds, label_order=VULN_TYPES)
+    val_metrics = compute_multilabel_metrics(
+        val_split.labels,
+        val_pred,
+        y_prob=val_prob,
+        label_order=VULN_TYPES,
+        inference_seconds=val_inference_seconds,
+    )
+
+    print("[eval] Evaluating on test split...")
+    test_start = perf_counter()
+    test_prob = model.predict_proba(test_split.records)
+    test_inference_seconds = perf_counter() - test_start
+    test_pred = apply_thresholds(test_prob, thresholds, label_order=VULN_TYPES)
+    test_metrics = compute_multilabel_metrics(
+        test_split.labels,
+        test_pred,
+        y_prob=test_prob,
+        label_order=VULN_TYPES,
+        inference_seconds=test_inference_seconds,
+    )
+
+    result = _save_run_outputs(
+        run_dir=run_dir,
+        summary_title="Slither Detector Baseline Summary",
+        train_split=train_split,
+        val_split=val_split,
+        test_split=test_split,
+        val_prob=val_prob,
+        val_pred=val_pred,
+        val_metrics=val_metrics,
+        test_prob=test_prob,
+        test_pred=test_pred,
+        test_metrics=test_metrics,
+        thresholds=thresholds,
+        config=_config_from_args(args),
+    )
+    return result
+
+
 def run_hybrid_experiment(args) -> Path:
     run_dir = _ensure_run_dir(args.output_dir, args.run_name)
     train_split, val_split, test_split = _load_splits(args)
@@ -503,6 +578,9 @@ def run_hybrid_experiment(args) -> Path:
         selection_threshold_min_precision=args.threshold_min_precision,
         device=args.device,
         seed=args.seed,
+        enable_cross_contract=args.hybrid_enable_cross_contract,
+        cross_contract_use_slither=args.hybrid_cross_contract_use_slither,
+        cross_contract_residual_scale=args.hybrid_cross_contract_residual_scale,
     )
     model.fit(
         train_split.records,
@@ -702,6 +780,8 @@ def run_multi_seed_experiments(args):
             result = run_gnn_experiment(seed_args)
         elif seed_args.model == "hybrid":
             result = run_hybrid_experiment(seed_args)
+        elif seed_args.model == "slither":
+            result = run_slither_experiment(seed_args)
         else:
             raise ValueError(f"Unsupported model: {seed_args.model}")
         run_results.append(
@@ -739,9 +819,9 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--model",
-        choices=["tabular", "codebert", "gnn", "hybrid"],
+        choices=["tabular", "codebert", "gnn", "hybrid", "slither"],
         default="tabular",
-        help="Which baseline to run.",
+        help="Which baseline to run (slither = static-analysis detector baseline, no training).",
     )
     parser.add_argument(
         "--split-dir",
@@ -837,6 +917,34 @@ def build_parser() -> argparse.ArgumentParser:
         choices=["micro_f1", "weighted_f1", "subset_accuracy"],
         default="micro_f1",
     )
+    parser.add_argument(
+        "--hybrid-enable-cross-contract",
+        action="store_true",
+        help="Fuse cross-contract call-graph features into the hybrid model.",
+    )
+    parser.add_argument(
+        "--hybrid-cross-contract-use-slither",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Use Slither for cross-contract call edges (fallback: regex).",
+    )
+    parser.add_argument(
+        "--hybrid-cross-contract-residual-scale",
+        type=float,
+        default=0.15,
+        help="Residual scale for cross-contract fusion branch.",
+    )
+    parser.add_argument(
+        "--slither-fail-on-compile-error",
+        action="store_true",
+        help="Abort Slither baseline if a contract fails to compile.",
+    )
+    parser.add_argument(
+        "--slither-default-probability",
+        type=float,
+        default=1.0,
+        help="Probability assigned when a Slither detector hits a function.",
+    )
     return parser
 
 
@@ -850,6 +958,8 @@ def main():
             if args.model == "gnn"
             else "experiments/hybrid_baseline"
             if args.model == "hybrid"
+            else "experiments/slither_baseline"
+            if args.model == "slither"
             else "experiments/tabular_baseline"
         )
     if args.seeds and len(args.seeds) > 1:
@@ -868,6 +978,9 @@ def main():
         return
     if args.model == "hybrid":
         run_hybrid_experiment(args)
+        return
+    if args.model == "slither":
+        run_slither_experiment(args)
         return
     raise ValueError(f"Unsupported model: {args.model}")
 

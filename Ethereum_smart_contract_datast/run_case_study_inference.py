@@ -73,6 +73,9 @@ def _load_hybrid_model(run_dir: Path, device: str | None):
         dropout=float(cfg.get("dropout", 0.2)),
         eval_batch_size=8,
         device=device,
+        enable_cross_contract=bool(cfg.get("enable_cross_contract", False)),
+        cross_contract_use_slither=bool(cfg.get("cross_contract_use_slither", True)),
+        cross_contract_residual_scale=float(cfg.get("cross_contract_residual_scale", 0.15)),
     )
     model._build_model(len(VULN_TYPES))
     state_dict = torch.load(state_path, map_location=model.device)

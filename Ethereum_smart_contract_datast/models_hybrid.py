@@ -17,6 +17,7 @@ from torch.optim import AdamW
 from torch.utils.data import DataLoader, Dataset
 from transformers import AutoModel, AutoTokenizer
 
+from cross_contract import CROSS_CONTRACT_VECTOR_DIM, CrossContractIndex, build_cross_contract_index
 from experiment_utils import VULN_TYPES, apply_thresholds, choose_thresholds, compute_multilabel_metrics
 from models_gnn import _ASTCFGGraphBuilder, _GCNLayer
 
@@ -58,13 +59,19 @@ class _HybridCodeGraphClassifier(nn.Module):
         graph_residual_scale: float,
         num_labels: int,
         dropout: float,
+        enable_cross_contract: bool = False,
+        cross_contract_residual_scale: float = 0.15,
     ):
         super().__init__()
         self.text_encoder = text_encoder
         self.graph_layers = nn.ModuleList(graph_layers)
         self.graph_norm = nn.LayerNorm(graph_hidden_dim * 2)
+        self.enable_cross_contract = enable_cross_contract
+        self.cross_contract_residual_scale = cross_contract_residual_scale
         self.text_proj = nn.Linear(encoder_hidden_size, fusion_dim)
         self.graph_proj = nn.Linear(graph_hidden_dim * 2, fusion_dim)
+        if enable_cross_contract:
+            self.cross_contract_proj = nn.Linear(CROSS_CONTRACT_VECTOR_DIM, fusion_dim)
         self.modality_attention = nn.MultiheadAttention(
             embed_dim=fusion_dim,
             num_heads=attention_heads,
@@ -130,6 +137,7 @@ class _HybridCodeGraphClassifier(nn.Module):
         x: torch.Tensor,
         adj: torch.Tensor,
         mask: torch.Tensor,
+        cross_contract: torch.Tensor | None = None,
     ) -> torch.Tensor:
         text_embedding = self._encode_text(input_ids=input_ids, attention_mask=attention_mask)
         graph_embedding = self._encode_graph(x=x, adj=adj, mask=mask)
@@ -150,6 +158,9 @@ class _HybridCodeGraphClassifier(nn.Module):
         gate = self.graph_gate(fusion_inputs)
         graph_delta = self.graph_delta(fusion_inputs)
         gated_fusion = text_feature + self.graph_residual_scale * gate * graph_delta
+        if self.enable_cross_contract and cross_contract is not None:
+            cross_feature = self.cross_contract_proj(cross_contract)
+            gated_fusion = gated_fusion + self.cross_contract_residual_scale * cross_feature
 
         fused = torch.cat(
             [text_feature, attended_summary, gated_fusion, difference],
@@ -189,6 +200,9 @@ class HybridCodeBERTGNNMultilabelBaseline:
         selection_threshold_min_precision: float = 0.15,
         device: str | None = None,
         seed: int = 42,
+        enable_cross_contract: bool = False,
+        cross_contract_use_slither: bool = True,
+        cross_contract_residual_scale: float = 0.15,
     ):
         self.model_name = model_name
         self.max_length = max_length
@@ -216,6 +230,10 @@ class HybridCodeBERTGNNMultilabelBaseline:
         self.selection_threshold_min_support = selection_threshold_min_support
         self.selection_threshold_min_precision = selection_threshold_min_precision
         self.seed = seed
+        self.enable_cross_contract = enable_cross_contract
+        self.cross_contract_use_slither = cross_contract_use_slither
+        self.cross_contract_residual_scale = cross_contract_residual_scale
+        self.cross_contract_index: CrossContractIndex | None = None
         self.device = torch.device(device or ("cuda" if torch.cuda.is_available() else "cpu"))
         self.tokenizer = AutoTokenizer.from_pretrained(model_name)
         self.model: _HybridCodeGraphClassifier | None = None
@@ -252,7 +270,15 @@ class HybridCodeBERTGNNMultilabelBaseline:
             graph_residual_scale=self.graph_residual_scale,
             num_labels=num_labels,
             dropout=self.dropout,
+            enable_cross_contract=self.enable_cross_contract,
+            cross_contract_residual_scale=self.cross_contract_residual_scale,
         ).to(self.device)
+
+    def _cross_contract_vector(self, record: dict) -> np.ndarray:
+        vector = record.get("cross_contract_vector")
+        if vector is not None:
+            return np.asarray(vector, dtype=np.float32)
+        return np.zeros(CROSS_CONTRACT_VECTOR_DIM, dtype=np.float32)
 
     def _collate(self, batch: list[dict]) -> dict[str, torch.Tensor]:
         batch_size = len(batch)
@@ -261,6 +287,7 @@ class HybridCodeBERTGNNMultilabelBaseline:
         features = np.zeros((batch_size, self.max_nodes, self.feature_dim), dtype=np.float32)
         adjacency = np.zeros((batch_size, self.max_nodes, self.max_nodes), dtype=np.float32)
         masks = np.zeros((batch_size, self.max_nodes), dtype=np.float32)
+        cross_contract = np.zeros((batch_size, CROSS_CONTRACT_VECTOR_DIM), dtype=np.float32)
 
         encoded = self.tokenizer(
             texts,
@@ -275,13 +302,15 @@ class HybridCodeBERTGNNMultilabelBaseline:
             features[idx] = x
             adjacency[idx] = adj
             masks[idx] = mask
+            if self.enable_cross_contract:
+                cross_contract[idx] = self._cross_contract_vector(item["record"])
 
         adjacency_tensor = torch.tensor(adjacency, dtype=torch.float32)
         degree = adjacency_tensor.sum(dim=-1)
         degree_inv_sqrt = torch.pow(torch.clamp(degree, min=1.0), -0.5)
         normalized_adjacency = adjacency_tensor * degree_inv_sqrt.unsqueeze(-1) * degree_inv_sqrt.unsqueeze(-2)
 
-        return {
+        batch_tensors = {
             "input_ids": encoded["input_ids"],
             "attention_mask": encoded["attention_mask"],
             "x": torch.tensor(features, dtype=torch.float32),
@@ -289,6 +318,9 @@ class HybridCodeBERTGNNMultilabelBaseline:
             "mask": torch.tensor(masks, dtype=torch.float32),
             "labels": torch.tensor(labels, dtype=torch.float32),
         }
+        if self.enable_cross_contract:
+            batch_tensors["cross_contract"] = torch.tensor(cross_contract, dtype=torch.float32)
+        return batch_tensors
 
     def _compute_pos_weight(self, labels: np.ndarray) -> torch.Tensor:
         positives = labels.sum(axis=0)
@@ -330,6 +362,32 @@ class HybridCodeBERTGNNMultilabelBaseline:
         weighted = float(metrics.get("weighted_f1", 0.0))
         return (primary, weighted, -float(val_loss))
 
+    def _prepare_records_with_cross_contract(
+        self,
+        train_records: list[dict],
+        val_records: list[dict] | None,
+    ) -> tuple[list[dict], list[dict] | None]:
+        if not self.enable_cross_contract:
+            return train_records, val_records
+        index_records = list(train_records)
+        if val_records:
+            index_records.extend(val_records)
+        print(
+            f"[cross-contract] Building call graph over {len(index_records)} function records "
+            f"(use_slither={self.cross_contract_use_slither})..."
+        )
+        self.cross_contract_index = build_cross_contract_index(
+            index_records,
+            use_slither=self.cross_contract_use_slither,
+        )
+        enriched_train = self.cross_contract_index.enrich_records(train_records)
+        enriched_val = (
+            self.cross_contract_index.enrich_records(val_records)
+            if val_records is not None
+            else None
+        )
+        return enriched_train, enriched_val
+
     def fit(
         self,
         train_records: list[dict],
@@ -337,6 +395,10 @@ class HybridCodeBERTGNNMultilabelBaseline:
         val_records: list[dict] | None = None,
         val_labels: np.ndarray | None = None,
     ):
+        train_records, val_records = self._prepare_records_with_cross_contract(
+            train_records,
+            val_records,
+        )
         self._build_model(train_labels.shape[1])
         train_dataset = _HybridFunctionDataset(train_records, train_labels)
         train_loader = DataLoader(
@@ -480,6 +542,13 @@ class HybridCodeBERTGNNMultilabelBaseline:
 
     def predict_proba(self, records: list[dict]) -> np.ndarray:
         assert self.model is not None
+        if self.enable_cross_contract:
+            if self.cross_contract_index is None:
+                self.cross_contract_index = build_cross_contract_index(
+                    records,
+                    use_slither=self.cross_contract_use_slither,
+                )
+            records = self.cross_contract_index.enrich_records(records)
         dataset = _HybridFunctionDataset(
             records,
             np.zeros((len(records), self.model.num_labels), dtype=np.float32),
@@ -535,5 +604,8 @@ class HybridCodeBERTGNNMultilabelBaseline:
             "selection_threshold_min_support": self.selection_threshold_min_support,
             "selection_threshold_min_precision": self.selection_threshold_min_precision,
             "num_labels": self.model.num_labels,
+            "enable_cross_contract": self.enable_cross_contract,
+            "cross_contract_use_slither": self.cross_contract_use_slither,
+            "cross_contract_residual_scale": self.cross_contract_residual_scale,
         }
         (output_path / "hybrid_config.json").write_text(json.dumps(metadata, indent=2), encoding="utf-8")
