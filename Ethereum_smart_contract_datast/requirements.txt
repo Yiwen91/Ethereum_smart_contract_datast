@@ -7,6 +7,8 @@ slither-analyzer>=0.10.0
 scikit-learn
 ijson
 transformers
+shap>=0.44.0
+matplotlib>=3.7.0
 
 # Standard library dependencies (usually included with Python)
 # json, csv, re, pathlib, dataclasses, collections, argparse
