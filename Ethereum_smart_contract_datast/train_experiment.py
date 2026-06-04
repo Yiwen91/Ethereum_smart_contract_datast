@@ -136,6 +136,7 @@ def _config_from_args(args) -> dict:
                 "save_model": args.save_model,
                 "max_pos_weight": args.max_pos_weight,
                 "grad_clip_norm": args.grad_clip_norm,
+                "codebert_checkpoint_metric": args.codebert_checkpoint_metric,
             }
         )
     elif args.model == "gnn":
@@ -359,6 +360,11 @@ def run_codebert_experiment(args) -> Path:
         epochs=args.epochs,
         max_pos_weight=args.max_pos_weight,
         grad_clip_norm=args.grad_clip_norm,
+        checkpoint_metric=args.codebert_checkpoint_metric,
+        selection_candidate_thresholds=args.threshold_candidates,
+        selection_default_threshold=args.default_threshold,
+        selection_threshold_min_support=args.threshold_min_support,
+        selection_threshold_min_precision=args.threshold_min_precision,
         device=args.device,
         seed=args.seed,
     )
@@ -956,6 +962,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--hybrid-grad-clip-norm", type=float, default=1.0)
     parser.add_argument("--hybrid-gradient-accumulation-steps", type=int, default=1)
     parser.add_argument("--hybrid-encoder-warmup-epochs", type=int, default=0)
+    parser.add_argument(
+        "--codebert-checkpoint-metric",
+        choices=["micro_f1", "weighted_f1", "subset_accuracy"],
+        default="micro_f1",
+        help="Save best CodeBERT epoch by this validation metric (not val_loss).",
+    )
     parser.add_argument(
         "--hybrid-checkpoint-metric",
         choices=["micro_f1", "weighted_f1", "subset_accuracy"],
