@@ -14,6 +14,8 @@ from torch.optim import AdamW
 from torch.utils.data import DataLoader, Dataset
 from transformers import AutoModelForSequenceClassification, AutoTokenizer
 
+from experiment_utils import VULN_TYPES, apply_thresholds, choose_thresholds, compute_multilabel_metrics
+
 
 class _FunctionTextDataset(Dataset):
     def __init__(self, texts: list[str], labels: np.ndarray):
@@ -34,6 +36,9 @@ class _FunctionTextDataset(Dataset):
 class CodeBERTTrainingHistory:
     train_losses: list[float]
     val_losses: list[float]
+    val_micro_f1: list[float]
+    val_weighted_f1: list[float]
+    best_epoch: int | None = None
 
 
 class CodeBERTMultilabelBaseline:
@@ -49,6 +54,11 @@ class CodeBERTMultilabelBaseline:
         epochs: int = 2,
         max_pos_weight: float = 8.0,
         grad_clip_norm: float = 1.0,
+        checkpoint_metric: str = "micro_f1",
+        selection_candidate_thresholds: list[float] | None = None,
+        selection_default_threshold: float = 0.5,
+        selection_threshold_min_support: int = 5,
+        selection_threshold_min_precision: float = 0.0,
         device: str | None = None,
         seed: int = 42,
     ):
@@ -61,11 +71,21 @@ class CodeBERTMultilabelBaseline:
         self.epochs = epochs
         self.max_pos_weight = max_pos_weight
         self.grad_clip_norm = grad_clip_norm
+        self.checkpoint_metric = checkpoint_metric
+        self.selection_candidate_thresholds = selection_candidate_thresholds
+        self.selection_default_threshold = selection_default_threshold
+        self.selection_threshold_min_support = selection_threshold_min_support
+        self.selection_threshold_min_precision = selection_threshold_min_precision
         self.seed = seed
         self.device = torch.device(device or ("cuda" if torch.cuda.is_available() else "cpu"))
         self.tokenizer = AutoTokenizer.from_pretrained(model_name)
         self.model = None
-        self.history = CodeBERTTrainingHistory(train_losses=[], val_losses=[])
+        self.history = CodeBERTTrainingHistory(
+            train_losses=[],
+            val_losses=[],
+            val_micro_f1=[],
+            val_weighted_f1=[],
+        )
         self._set_seed(seed)
 
     @staticmethod
@@ -103,6 +123,11 @@ class CodeBERTMultilabelBaseline:
         weights = np.clip(weights, 1.0, self.max_pos_weight)
         return torch.tensor(weights, dtype=torch.float32)
 
+    def _checkpoint_score(self, metrics: dict, val_loss: float) -> tuple[float, float, float]:
+        primary = float(metrics.get(self.checkpoint_metric, 0.0))
+        weighted = float(metrics.get("weighted_f1", 0.0))
+        return (primary, weighted, -float(val_loss))
+
     def fit(
         self,
         train_texts: list[str],
@@ -135,8 +160,13 @@ class CodeBERTMultilabelBaseline:
             )
 
         best_state = None
-        best_val_loss = None
-        self.history = CodeBERTTrainingHistory(train_losses=[], val_losses=[])
+        best_score = None
+        self.history = CodeBERTTrainingHistory(
+            train_losses=[],
+            val_losses=[],
+            val_micro_f1=[],
+            val_weighted_f1=[],
+        )
 
         for epoch in range(self.epochs):
             self.model.train()
@@ -163,15 +193,39 @@ class CodeBERTMultilabelBaseline:
             if val_loader is None:
                 continue
 
-            val_loss = self.evaluate_loss(val_loader, loss_fn)
+            val_loss, val_prob = self.evaluate_loss_and_probabilities(val_loader, loss_fn)
             self.history.val_losses.append(val_loss)
-            if best_val_loss is None or val_loss < best_val_loss:
-                best_val_loss = val_loss
-                best_state = {key: value.detach().cpu().clone() for key, value in self.model.state_dict().items()}
+            thresholds = choose_thresholds(
+                val_labels,
+                val_prob,
+                label_order=VULN_TYPES,
+                candidate_thresholds=self.selection_candidate_thresholds,
+                default_threshold=self.selection_default_threshold,
+                min_support=self.selection_threshold_min_support,
+                min_precision=self.selection_threshold_min_precision,
+            )
+            val_pred = apply_thresholds(val_prob, thresholds, label_order=VULN_TYPES)
+            val_metrics = compute_multilabel_metrics(
+                val_labels,
+                val_pred,
+                y_prob=val_prob,
+                label_order=VULN_TYPES,
+            )
+            self.history.val_micro_f1.append(val_metrics["micro_f1"])
+            self.history.val_weighted_f1.append(val_metrics["weighted_f1"])
+            current_score = self._checkpoint_score(val_metrics, val_loss)
+            if best_score is None or current_score > best_score:
+                best_score = current_score
+                best_state = {
+                    key: value.detach().cpu().clone() for key, value in self.model.state_dict().items()
+                }
+                self.history.best_epoch = epoch + 1
 
             print(
                 f"[train] Epoch {epoch + 1}/{self.epochs} "
-                f"train_loss={train_loss:.4f} val_loss={val_loss:.4f}"
+                f"train_loss={train_loss:.4f} val_loss={val_loss:.4f} "
+                f"val_micro_f1={val_metrics['micro_f1']:.4f} "
+                f"val_weighted_f1={val_metrics['weighted_f1']:.4f}"
             )
 
         if best_state is not None:
@@ -179,20 +233,32 @@ class CodeBERTMultilabelBaseline:
         return self
 
     def evaluate_loss(self, dataloader: DataLoader, loss_fn: nn.Module) -> float:
+        loss, _ = self.evaluate_loss_and_probabilities(dataloader, loss_fn)
+        return loss
+
+    def evaluate_loss_and_probabilities(
+        self,
+        dataloader: DataLoader,
+        loss_fn: nn.Module,
+    ) -> tuple[float, np.ndarray]:
         assert self.model is not None
         self.model.eval()
         running_loss = 0.0
         total_examples = 0
+        outputs = []
         with torch.no_grad():
             for batch in dataloader:
                 labels = batch.pop("labels").to(self.device)
                 batch = {key: value.to(self.device) for key, value in batch.items()}
-                outputs = self.model(**batch)
-                loss = loss_fn(outputs.logits, labels)
+                logits = self.model(**batch).logits
+                loss = loss_fn(logits, labels)
                 batch_size = labels.size(0)
                 running_loss += loss.item() * batch_size
                 total_examples += batch_size
-        return running_loss / max(total_examples, 1)
+                outputs.append(torch.sigmoid(logits).cpu().numpy())
+        if not outputs:
+            return 0.0, np.zeros((0, self.model.config.num_labels), dtype=np.float32)
+        return running_loss / max(total_examples, 1), np.vstack(outputs).astype(np.float32)
 
     def predict_proba(self, texts: list[str]) -> np.ndarray:
         assert self.model is not None

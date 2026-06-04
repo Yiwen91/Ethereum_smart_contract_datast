@@ -62,6 +62,33 @@ If Slither is unavailable or fails on a contract, the pipeline can fall back to 
 python standardize_dataset.py <input_directory> --output-dir standardized_dataset --format both
 ```
 
+## Colab upload zips (Slither splits)
+
+Large split JSON files are packaged for Google Drive / Colab upload:
+
+| Zip file | Contents | Size (approx.) |
+|----------|----------|----------------|
+| `esc_primary_slither.zip` | `experiment_splits/esc_primary_slither/` | ~83 MB |
+| `esc_primary.zip` | Same as above (legacy filename) | ~83 MB |
+| `smartbugs_secondary_slither.zip` | `experiment_splits/smartbugs_secondary_slither/` | ~133 MB |
+| `codebert_base.zip` | `hf_models/codebert-base/` for offline training | ~442 MB |
+
+Rebuild after regenerating splits:
+
+```cmd
+py pack_colab_zips.py
+```
+
+Colab unpack:
+
+```python
+!unzip -q -o esc_primary_slither.zip -d experiment_splits
+!unzip -q -o smartbugs_secondary_slither.zip -d experiment_splits
+```
+
+Full experiment notebook: `thesis_md/colab_end_to_end_slither_experiments.md`.  
+**One-shot (all ablations + SHAP in one session):** `thesis_md/colab_one_shot_full_pipeline.md` and `colab_one_shot_full_pipeline.py`.
+
 ## Dataset Workflows
 
 This project now supports two dataset roles:
