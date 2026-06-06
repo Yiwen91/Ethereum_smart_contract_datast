@@ -41,6 +41,27 @@ def require_shap() -> None:
         )
 
 
+def _clean_token(token: str) -> str:
+    """Normalize a BPE subword token to a human-readable form for thesis output.
+
+    RoBERTa/CodeBERT use 'Ġ' for a leading space and 'Ċ' for a newline.
+    """
+    cleaned = token.replace("Ġ", "").replace("Ċ", "").replace("ĉ", "").strip()
+    return cleaned
+
+
+_PUNCT_ONLY = set("()[]{}.,;:+-*/%=<>!&|^~?@#\"'`\\ ")
+
+
+def _is_meaningful_token(token: str) -> bool:
+    """Filter out empty / pure-punctuation tokens that are not informative."""
+    if not token:
+        return False
+    if all(ch in _PUNCT_ONLY for ch in token):
+        return False
+    return True
+
+
 @dataclass
 class TokenAttribution:
     token: str
@@ -232,8 +253,14 @@ def explain_text_model_label(
 
         limit = min(len(tokens), len(row))
         for token_idx in range(limit):
+            raw_token = str(tokens[token_idx])
+            cleaned = _clean_token(raw_token)
+            if not _is_meaningful_token(cleaned):
+                continue
+            if cleaned in ("<s>", "</s>", "<pad>", "...", "s", "/s", "pad"):
+                continue
             token_attrs.append(
-                TokenAttribution(token=str(tokens[token_idx]), shap_value=float(row[token_idx]))
+                TokenAttribution(token=cleaned, shap_value=float(row[token_idx]))
             )
 
         record = records[idx] if idx < len(records) else {}
