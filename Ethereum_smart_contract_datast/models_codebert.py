@@ -147,7 +147,7 @@ class CodeBERTMultilabelBaseline:
         pos_weight = self._compute_pos_weight(train_labels).to(self.device)
         loss_fn = nn.BCEWithLogitsLoss(pos_weight=pos_weight)
         optimizer = AdamW(self.model.parameters(), lr=self.learning_rate, weight_decay=self.weight_decay)
-        print(f"[train] Using capped sqrt pos_weight: {pos_weight.detach().cpu().tolist()}")
+        print(f"[train] Using capped sqrt pos_weight: {pos_weight.detach().cpu().tolist()}", flush=True)
 
         val_loader = None
         if val_texts is not None and val_labels is not None and len(val_texts) > 0:
@@ -172,7 +172,12 @@ class CodeBERTMultilabelBaseline:
             self.model.train()
             running_loss = 0.0
             total_examples = 0
-            for batch in train_loader:
+            for batch_idx, batch in enumerate(train_loader, start=1):
+                if batch_idx == 1 or batch_idx % 500 == 0:
+                    print(
+                        f"[train] Epoch {epoch + 1}/{self.epochs} batch {batch_idx}/{len(train_loader)}",
+                        flush=True,
+                    )
                 labels = batch.pop("labels").to(self.device)
                 batch = {key: value.to(self.device) for key, value in batch.items()}
                 optimizer.zero_grad()
@@ -225,7 +230,8 @@ class CodeBERTMultilabelBaseline:
                 f"[train] Epoch {epoch + 1}/{self.epochs} "
                 f"train_loss={train_loss:.4f} val_loss={val_loss:.4f} "
                 f"val_micro_f1={val_metrics['micro_f1']:.4f} "
-                f"val_weighted_f1={val_metrics['weighted_f1']:.4f}"
+                f"val_weighted_f1={val_metrics['weighted_f1']:.4f}",
+                flush=True,
             )
 
         if best_state is not None:

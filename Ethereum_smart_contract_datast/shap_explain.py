@@ -198,11 +198,13 @@ def explain_text_model_label(
     require_shap()
 
     masker = shap.maskers.Text(tokenizer, mask_token="...")
-    explainer = shap.Explainer(
-        lambda masked_texts: predict_label_proba(list(masked_texts)),
-        masker,
-        output_names=[label],
-    )
+
+    def _predict_for_shap(masked_texts) -> np.ndarray:
+        probs = predict_label_proba(list(masked_texts))
+        return np.asarray(probs, dtype=np.float32).reshape(-1)
+
+    # Single scalar output per sample — do not pass output_names (SHAP 0.4x asserts otherwise).
+    explainer = shap.Explainer(_predict_for_shap, masker)
 
     shap_values = explainer(texts, max_evals=max_evals)
     if hasattr(shap_values, "values"):

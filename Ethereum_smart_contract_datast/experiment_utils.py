@@ -281,13 +281,18 @@ def _iter_function_records(json_path: str | Path) -> Iterable[dict]:
 def _reservoir_sample(records: Iterable[dict], max_samples: int, seed: int) -> list[dict]:
     rng = random.Random(seed)
     sample: list[dict] = []
+    scanned = 0
     for idx, record in enumerate(records):
+        scanned = idx + 1
+        if scanned % 100_000 == 0:
+            print(f"[load] Reservoir scan: {scanned:,} records read...", flush=True)
         if idx < max_samples:
             sample.append(record)
             continue
         replace_at = rng.randint(0, idx)
         if replace_at < max_samples:
             sample[replace_at] = record
+    print(f"[load] Reservoir done: {scanned:,} records scanned, kept {len(sample):,}", flush=True)
     return sample
 
 

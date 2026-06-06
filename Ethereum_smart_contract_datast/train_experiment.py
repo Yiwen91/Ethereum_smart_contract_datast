@@ -67,6 +67,12 @@ def _load_splits(args) -> tuple[LoadedSplit, LoadedSplit, LoadedSplit]:
     print(f"[load] Project root for contract paths: {project_root}")
     if contracts_dir:
         print(f"[load] Contracts directory override: {contracts_dir}")
+    # CodeBERT only uses function_code text; skip .sol path resolution (very slow on Colab).
+    normalize_paths = getattr(args, "normalize_contract_paths", True)
+    if getattr(args, "model", None) == "codebert":
+        normalize_paths = False
+        print("[load] CodeBERT: skipping contract path normalization (not needed).")
+
     print("[load] Reading train split...")
     train_split = load_named_split(
         "train",
@@ -76,7 +82,9 @@ def _load_splits(args) -> tuple[LoadedSplit, LoadedSplit, LoadedSplit]:
         sample_strategy=args.sample_strategy,
         project_root=project_root,
         contracts_dir=contracts_dir,
+        normalize_contract_paths=normalize_paths,
     )
+    print(f"[load] Train ready: {len(train_split.texts)} samples")
     print("[load] Reading validation split...")
     val_split = load_named_split(
         "val",
@@ -86,7 +94,9 @@ def _load_splits(args) -> tuple[LoadedSplit, LoadedSplit, LoadedSplit]:
         sample_strategy=args.sample_strategy,
         project_root=project_root,
         contracts_dir=contracts_dir,
+        normalize_contract_paths=normalize_paths,
     )
+    print(f"[load] Val ready: {len(val_split.texts)} samples")
     print("[load] Reading test split...")
     test_split = load_named_split(
         "test",
@@ -96,7 +106,9 @@ def _load_splits(args) -> tuple[LoadedSplit, LoadedSplit, LoadedSplit]:
         sample_strategy=args.sample_strategy,
         project_root=project_root,
         contracts_dir=contracts_dir,
+        normalize_contract_paths=normalize_paths,
     )
+    print(f"[load] Test ready: {len(test_split.texts)} samples")
     return train_split, val_split, test_split
 
 
