@@ -783,156 +783,102 @@ def explain_text_model_label(
 
 def build_hybrid_text_predict_fn(
     hybrid_model,
-    record:dict,
-    label_index:int
+    record: dict,
+    label_index: int
 ):
 
-    """
-    Explain only the text branch.
-
-    Graph features remain fixed.
-    """
-
     import torch
-
 
 
     assert hybrid_model.model is not None
 
 
-
     base_batch = hybrid_model._collate(
-        [
-            {
-                "record":record,
-                "labels":
-                    np.zeros(
-                        (
-                            1,
-                            hybrid_model.model.num_labels
-                        ),
-                        dtype=np.float32
-                    )
-            }
-        ]
+        [{
+            "record": record,
+            "labels": np.zeros(
+                (1, hybrid_model.model.num_labels),
+                dtype=np.float32
+            )
+        }]
     )
 
 
-
-    def predict_logit(texts:list[str]):
-
+    def predict_logit(masked_texts):
 
         encoded = hybrid_model.tokenizer(
-            texts,
+            list(masked_texts),
             truncation=True,
             padding=True,
             max_length=hybrid_model.max_length,
-            return_tensors="pt"
+            return_tensors="pt",
         )
 
 
-
-        batch_size=len(texts)
-
+        batch_size = len(masked_texts)
 
 
-        batch={
-
+        batch = {
             "input_ids":
                 encoded["input_ids"]
                 .to(hybrid_model.device),
-
 
             "attention_mask":
                 encoded["attention_mask"]
                 .to(hybrid_model.device),
 
-
             "x":
                 base_batch["x"]
-                .repeat(
-                    batch_size,
-                    1,
-                    1
-                )
+                .repeat(batch_size,1,1)
                 .to(hybrid_model.device),
-
 
             "adj":
                 base_batch["adj"]
-                .repeat(
-                    batch_size,
-                    1,
-                    1
-                )
+                .repeat(batch_size,1,1)
                 .to(hybrid_model.device),
-
 
             "mask":
                 base_batch["mask"]
-                .repeat(
-                    batch_size,
-                    1,
-                    1
-                )
+                .repeat(batch_size,1)
                 .to(hybrid_model.device),
-
         }
-
 
 
         if "cross_contract" in base_batch:
 
             batch["cross_contract"] = (
                 base_batch["cross_contract"]
-                .repeat(
-                    batch_size,
-                    1
-                )
+                .repeat(batch_size,1)
                 .to(hybrid_model.device)
             )
-
 
 
         hybrid_model.model.eval()
 
 
-
         with torch.no_grad():
 
-            logits = hybrid_model.model(
-                **batch
-            )
+            logits = hybrid_model.model(**batch)
 
 
-        return (
-            logits[:,label_index]
-            .cpu()
-            .numpy()
-            .astype(np.float32)
-        )
+            value = logits[:, label_index]
+
+
+        return value.cpu().numpy()
 
 
 
-    def predict_probability(texts):
+    def predict_probability(masked_texts):
 
-        logits = predict_logit(texts)
+        logits = predict_logit(masked_texts)
 
         return (
             1 /
-            (
-                1 +
-                np.exp(-logits)
-            )
+            (1 + np.exp(-logits))
         )
 
 
-
-    return (
-        predict_logit,
-        predict_probability
-    )
-
+    return predict_logit, predict_probability
 
 
 # ============================================================
