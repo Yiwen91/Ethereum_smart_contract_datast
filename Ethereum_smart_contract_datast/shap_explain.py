@@ -323,6 +323,7 @@ def build_hybrid_text_predict_fn(hybrid_model, record: dict, label_index: int):
                     .repeat(batch_size, 1)
                     .to(hybrid_model.device)
             )
+            
 
         hybrid_model.model.eval()
 
