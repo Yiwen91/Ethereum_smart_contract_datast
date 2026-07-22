@@ -28,7 +28,7 @@ from models_codebert import CodeBERTMultilabelBaseline
 from models_gnn import ASTCFGFunctionGNNMultilabelBaseline
 from models_hybrid import HybridCodeBERTGNNMultilabelBaseline
 from models_slither_baseline import SlitherDetectorMultilabelBaseline
-from models_tabular import TabularMultilabelBaseline
+from models_tabular import RandomForestMultilabelBaseline, TabularMultilabelBaseline
 
 
 def _timestamp() -> str:
@@ -124,16 +124,29 @@ def _config_from_args(args) -> dict:
         "contract_root": str(_project_root(args)),
         "contracts_dir": str(_contracts_dir(args)) if _contracts_dir(args) else None,
     }
-    if args.model == "tabular":
+    if args.model in {"tabular", "random_forest"}:
         config.update(
             {
                 "max_features": args.max_features,
                 "min_df": args.min_df,
                 "max_df": args.max_df,
-                "c_value": args.c_value,
-                "max_iter": args.max_iter,
             }
         )
+        if args.model == "tabular":
+            config.update(
+                {
+                    "c_value": args.c_value,
+                    "max_iter": args.max_iter,
+                }
+            )
+        else:
+            config.update(
+                {
+                    "rf_n_estimators": args.rf_n_estimators,
+                    "rf_max_depth": args.rf_max_depth,
+                    "rf_min_samples_leaf": args.rf_min_samples_leaf,
+                }
+            )
     elif args.model == "codebert":
         config.update(
             {
@@ -342,6 +355,75 @@ def run_tabular_experiment(args) -> Path:
     result = _save_run_outputs(
         run_dir=run_dir,
         summary_title="ESC Tabular Baseline Summary",
+        train_split=train_split,
+        val_split=val_split,
+        test_split=test_split,
+        val_prob=val_prob,
+        val_pred=val_pred,
+        val_metrics=val_metrics,
+        test_prob=test_prob,
+        test_pred=test_pred,
+        test_metrics=test_metrics,
+        thresholds=thresholds,
+        config=_config_from_args(args),
+    )
+    return result
+
+
+def run_random_forest_experiment(args) -> Path:
+    run_dir = _ensure_run_dir(args.output_dir, args.run_name)
+    train_split, val_split, test_split = _load_splits(args)
+
+    print("[train] Fitting TF-IDF + Random Forest baseline...")
+    model = RandomForestMultilabelBaseline(
+        max_features=args.max_features,
+        min_df=args.min_df,
+        max_df=args.max_df,
+        n_estimators=args.rf_n_estimators,
+        max_depth=args.rf_max_depth,
+        min_samples_leaf=args.rf_min_samples_leaf,
+        random_state=args.seed,
+    )
+    model.fit(train_split.texts, train_split.labels)
+
+    print("[eval] Selecting per-label thresholds on validation split...")
+    val_start = perf_counter()
+    val_prob = model.predict_proba(val_split.texts)
+    val_inference_seconds = perf_counter() - val_start
+    thresholds = choose_thresholds(
+        val_split.labels,
+        val_prob,
+        label_order=VULN_TYPES,
+        candidate_thresholds=args.threshold_candidates,
+        default_threshold=args.default_threshold,
+        min_support=args.threshold_min_support,
+        min_precision=args.threshold_min_precision,
+    )
+    val_pred = apply_thresholds(val_prob, thresholds, label_order=VULN_TYPES)
+    val_metrics = compute_multilabel_metrics(
+        val_split.labels,
+        val_pred,
+        y_prob=val_prob,
+        label_order=VULN_TYPES,
+        inference_seconds=val_inference_seconds,
+    )
+
+    print("[eval] Evaluating on test split...")
+    test_start = perf_counter()
+    test_prob = model.predict_proba(test_split.texts)
+    test_inference_seconds = perf_counter() - test_start
+    test_pred = apply_thresholds(test_prob, thresholds, label_order=VULN_TYPES)
+    test_metrics = compute_multilabel_metrics(
+        test_split.labels,
+        test_pred,
+        y_prob=test_prob,
+        label_order=VULN_TYPES,
+        inference_seconds=test_inference_seconds,
+    )
+
+    result = _save_run_outputs(
+        run_dir=run_dir,
+        summary_title="Random Forest Baseline Summary",
         train_split=train_split,
         val_split=val_split,
         test_split=test_split,
@@ -828,6 +910,8 @@ def run_multi_seed_experiments(args):
         print(f"[multi-seed] Starting seed {seed}...")
         if seed_args.model == "tabular":
             result = run_tabular_experiment(seed_args)
+        elif seed_args.model == "random_forest":
+            result = run_random_forest_experiment(seed_args)
         elif seed_args.model == "codebert":
             result = run_codebert_experiment(seed_args)
         elif seed_args.model == "gnn":
@@ -873,7 +957,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--model",
-        choices=["tabular", "codebert", "gnn", "hybrid", "slither"],
+        choices=["tabular", "random_forest", "codebert", "gnn", "hybrid", "slither"],
         default="tabular",
         help="Which baseline to run (slither = static-analysis detector baseline, no training).",
     )
@@ -906,6 +990,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--max-df", type=float, default=0.95)
     parser.add_argument("--c-value", type=float, default=4.0)
     parser.add_argument("--max-iter", type=int, default=1000)
+    parser.add_argument("--rf-n-estimators", type=int, default=200)
+    parser.add_argument("--rf-max-depth", type=int, default=None)
+    parser.add_argument("--rf-min-samples-leaf", type=int, default=1)
     parser.add_argument("--codebert-model-name", default="microsoft/codebert-base")
     parser.add_argument("--max-length", type=int, default=256)
     parser.add_argument("--train-batch-size", type=int, default=8)
@@ -1028,6 +1115,8 @@ def main():
             if args.model == "hybrid"
             else "experiments/slither_baseline"
             if args.model == "slither"
+            else "experiments/random_forest_baseline"
+            if args.model == "random_forest"
             else "experiments/tabular_baseline"
         )
     if args.seeds and len(args.seeds) > 1:
@@ -1037,6 +1126,9 @@ def main():
         args.seed = args.seeds[0]
     if args.model == "tabular":
         run_tabular_experiment(args)
+        return
+    if args.model == "random_forest":
+        run_random_forest_experiment(args)
         return
     if args.model == "codebert":
         run_codebert_experiment(args)
