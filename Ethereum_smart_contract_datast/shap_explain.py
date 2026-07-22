@@ -433,6 +433,120 @@ def _global_token_importance(
 # TEXT MODEL SHAP EXPLANATION
 # ============================================================
 
+def explain_tabular_label(
+    model,
+    *,
+    texts: list[str],
+    label: str,
+    label_index: int,
+    background_texts: list[str],
+    max_evals: int | None = 500,
+) -> list[SampleShapExplanation]:
+
+    require_shap()
+
+    label_model = model.models[label_index]
+
+    background = model.transform(background_texts)
+
+    if background.shape[0] == 0:
+        raise ValueError(
+            "Background samples are empty for tabular SHAP."
+        )
+
+    def predict_fn(x):
+
+        if hasattr(x, "toarray"):
+            x = x.toarray()
+
+        x = np.asarray(x)
+
+        if x.ndim == 1:
+            x = x.reshape(1, -1)
+
+        return label_model.predict_proba(x)[:, 1]
+
+
+    explainer = shap.Explainer(
+        predict_fn,
+        background,
+        max_evals=max_evals,
+    )
+
+
+    features = model.transform(texts)
+
+    shap_values = explainer(features)
+
+
+    values = np.asarray(shap_values.values)
+
+    base_values = np.asarray(
+        shap_values.base_values
+    )
+
+
+    if values.ndim == 3:
+        values = values[:, :, 1]
+
+
+    feature_names = np.asarray(
+        model.vectorizer.get_feature_names_out()
+    )
+
+
+    probs = model.predict_proba(texts)[:, label_index]
+
+
+    explanations = []
+
+
+    for idx, text in enumerate(texts):
+
+        row = values[idx]
+
+
+        top_idx = np.argsort(
+            np.abs(row)
+        )[::-1][:20]
+
+
+        attrs = []
+
+        for i in top_idx:
+
+            if abs(row[i]) < 1e-8:
+                continue
+
+            attrs.append(
+                FeatureAttribution(
+                    feature=str(feature_names[i]),
+                    shap_value=float(row[i]),
+                )
+            )
+
+
+        explanations.append(
+            SampleShapExplanation(
+                sample_index=idx,
+                contract_file="",
+                function_name="",
+                label=label,
+                predicted_probability=float(probs[idx]),
+                base_value=float(
+                    base_values[idx]
+                    if np.ndim(base_values)
+                    else base_values
+                ),
+                attributions=attrs,
+                explanation_type="tfidf_features",
+                function_code_preview=text[:500],
+            )
+        )
+
+
+    return explanations
+
 
 def explain_text_model_label(
     *,
