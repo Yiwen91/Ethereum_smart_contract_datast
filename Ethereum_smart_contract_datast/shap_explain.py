@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-SHAP-based interpretability for experiment models (tabular, CodeBERT, hybrid).
+SHAP-based interpretability for experiment models (tabular, Random Forest, CodeBERT, hybrid).
 
 Hybrid explanations target the **semantic (text) branch** while holding the AST/CFG graph
 fixed per function — practical for thesis case studies and sample-level reports.
@@ -297,20 +297,33 @@ def build_hybrid_text_predict_fn(hybrid_model, record: dict, label_index: int):
             max_length=hybrid_model.max_length,
             return_tensors="pt",
         )
+
+        batch_size = len(texts)
+
         batch = {
             "input_ids": encoded["input_ids"].to(hybrid_model.device),
             "attention_mask": encoded["attention_mask"].to(hybrid_model.device),
-            "x": base_batch["x"].to(hybrid_model.device),
-            "adj": base_batch["adj"].to(hybrid_model.device),
-            "mask": base_batch["mask"].to(hybrid_model.device),
+
+            # repeat graph tensors for every masked text
+            "x": base_batch["x"].expand(batch_size, -1, -1),
+            "adj": base_batch["adj"].expand(batch_size, -1, -1),
+            "mask": base_batch["mask"].expand(batch_size, -1),
+
         }
+
         if "cross_contract" in base_batch:
-            batch["cross_contract"] = base_batch["cross_contract"].to(hybrid_model.device)
+            batch["cross_contract"] = (
+                base_batch["cross_contract"]
+                .expand(batch_size, -1)
+            )
+
         hybrid_model.model.eval()
+
         with torch.no_grad():
             logits = hybrid_model.model(**batch)
-            probs = torch.sigmoid(logits)[:, label_index].detach().cpu().numpy()
-        return probs.astype(np.float32)
+            probs = torch.sigmoid(logits)[:, label_index]
+
+        return probs.cpu().numpy().astype(np.float32)
 
     return predict_label_proba
 
