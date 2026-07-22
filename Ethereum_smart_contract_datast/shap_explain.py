@@ -304,19 +304,26 @@ def build_hybrid_text_predict_fn(hybrid_model, record: dict, label_index: int):
             "input_ids": encoded["input_ids"].to(hybrid_model.device),
             "attention_mask": encoded["attention_mask"].to(hybrid_model.device),
 
-            # repeat graph tensors for every masked text
-            "x": base_batch["x"].expand(batch_size, -1, -1),
-            "adj": base_batch["adj"].expand(batch_size, -1, -1),
-            "mask": base_batch["mask"].expand(batch_size, -1),
+            "x": base_batch["x"]
+                    .repeat(batch_size, 1, 1)
+                    .to(hybrid_model.device),
 
+            "adj": base_batch["adj"]
+                    .repeat(batch_size, 1, 1)
+                    .to(hybrid_model.device),
+
+            "mask": base_batch["mask"]
+                    .repeat(batch_size, 1)
+                    .to(hybrid_model.device),
         }
 
         if "cross_contract" in base_batch:
             batch["cross_contract"] = (
                 base_batch["cross_contract"]
-                .expand(batch_size, -1)
+                    .repeat(batch_size, 1)
+                    .to(hybrid_model.device)
             )
-            
+
 
         hybrid_model.model.eval()
 
