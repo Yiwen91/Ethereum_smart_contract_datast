@@ -3,13 +3,10 @@
 Generate SHAP explanations for a trained experiment run.
 
 Examples:
-  py run_shap_explain.py --model codebert --run-dir experiments/codebert_baseline/esc_codebert_tuned_100k \\
+  py run_shap_explain.py --model codebert --run-dir experiments/codebert_baseline/esc_codebert_tuned \\
     --split-dir experiment_splits/esc_primary --split val --label Reentrancy --max-samples 10
 
-  py run_shap_explain.py --model random_forest --run-dir experiments/random_forest_baseline/esc_rf_200k \\
-    --split-dir experiment_splits/esc_primary --split val --label Reentrancy --max-samples 10
-
-  py run_shap_explain.py --model hybrid --run-dir experiments/hybrid_baseline/esc_hybrid_recall_push_100k \\
+  py run_shap_explain.py --model hybrid --run-dir experiments/hybrid_baseline/esc_hybrid_case_study_ready \\
     --sol-file 0.sol --label Reentrancy
 """
 
@@ -24,7 +21,7 @@ import numpy as np
 from experiment_utils import VULN_TYPES, load_named_split
 from models_codebert import CodeBERTMultilabelBaseline
 from models_hybrid import HybridCodeBERTGNNMultilabelBaseline
-from models_tabular import RandomForestMultilabelBaseline, TabularMultilabelBaseline
+from models_tabular import TabularMultilabelBaseline
 from run_case_study_inference import _extract_records, _load_codebert_model, _load_hybrid_model
 from shap_explain import (
     _global_token_importance,
@@ -67,21 +64,6 @@ def _load_tabular_model(run_config: dict, train_split) -> TabularMultilabelBasel
     return model
 
 
-def _load_random_forest_model(run_config: dict, train_split) -> RandomForestMultilabelBaseline:
-    model = RandomForestMultilabelBaseline(
-        max_features=int(run_config.get("max_features", 50000)),
-        min_df=int(run_config.get("min_df", 2)),
-        max_df=float(run_config.get("max_df", 0.95)),
-        n_estimators=int(run_config.get("rf_n_estimators", 200)),
-        max_depth=run_config.get("rf_max_depth"),
-        min_samples_leaf=int(run_config.get("rf_min_samples_leaf", 1)),
-        random_state=int(run_config.get("seed", 42)),
-    )
-    print(f"[shap] Fitting Random Forest model on {len(train_split.texts)} train samples for SHAP background...")
-    model.fit(train_split.texts, train_split.labels)
-    return model
-
-
 def _select_positive_samples(
     texts: list[str],
     records: list[dict],
@@ -103,7 +85,7 @@ def _select_positive_samples(
 
 def main():
     parser = argparse.ArgumentParser(description="SHAP explanations for experiment runs.")
-    parser.add_argument("--model", choices=["tabular", "random_forest", "codebert", "hybrid"], required=True)
+    parser.add_argument("--model", choices=["tabular", "codebert", "hybrid"], required=True)
     parser.add_argument("--run-dir", required=True, help="Experiment run directory with run_config.json")
     parser.add_argument("--split-dir", help="Split directory with train/val/test JSON")
     parser.add_argument("--split", choices=["train", "val", "test"], default="val")
@@ -162,9 +144,9 @@ def main():
 
     print(f"[shap] Explaining label={label_name} for model={args.model} on {len(texts)} candidate functions...")
 
-    if args.model in {"tabular", "random_forest"}:
+    if args.model == "tabular":
         if args.sol_file:
-            raise ValueError(f"{args.model} SHAP requires --split-dir to refit TF-IDF on train split.")
+            raise ValueError("Tabular SHAP requires --split-dir to refit TF-IDF on train split.")
         train_split = load_named_split(
             "train",
             Path(args.split_dir) / "train.json",
@@ -172,10 +154,7 @@ def main():
             project_root=Path(args.contract_root).resolve() if args.contract_root else Path.cwd(),
             contracts_dir=Path(args.contracts_dir).resolve() if args.contracts_dir else None,
         )
-        if args.model == "tabular":
-            model = _load_tabular_model(run_config, train_split)
-        else:
-            model = _load_random_forest_model(run_config, train_split)
+        model = _load_tabular_model(run_config, train_split)
         probs = model.predict_proba(texts)
         selected_texts, selected_records, _ = _select_positive_samples(
             texts,

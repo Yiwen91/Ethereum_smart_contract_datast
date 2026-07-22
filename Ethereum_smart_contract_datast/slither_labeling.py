@@ -13,15 +13,6 @@ from pathlib import Path
 
 from report_vulnerability_counts import VULN_TYPES
 
-
-def _safe_print(message: str) -> None:
-    """Print without crashing on Windows consoles that cannot encode Unicode."""
-    try:
-        print(message)
-    except UnicodeEncodeError:
-        print(message.encode("ascii", errors="replace").decode("ascii"))
-
-
 SLITHER_CHECK_TO_VULN: dict[str, str] = {
     "reentrancy-eth": "Reentrancy",
     "reentrancy-no-eth": "Reentrancy",
@@ -211,7 +202,7 @@ class SlitherFunctionLabeler:
         except Exception as exc:
             if self.fail_on_compile_error:
                 raise
-            _safe_print(f"[slither-label] Skipping {contract_file}: {exc}")
+            print(f"[slither-label] Skipping {contract_file}: {exc}")
             self._cache[resolved] = {}
             self.stats["contracts_failed"] += 1
             return {}
