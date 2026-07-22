@@ -19,8 +19,6 @@ from pathlib import Path
 import numpy as np
 
 from experiment_utils import VULN_TYPES, load_named_split
-from models_codebert import CodeBERTMultilabelBaseline
-from models_hybrid import HybridCodeBERTGNNMultilabelBaseline
 from models_tabular import TabularMultilabelBaseline
 from run_case_study_inference import _extract_records, _load_codebert_model, _load_hybrid_model
 from shap_explain import (
@@ -72,15 +70,31 @@ def _select_positive_samples(
     *,
     max_samples: int,
     min_probability: float,
-) -> tuple[list[str], list[dict], np.ndarray]:
-    indices = [idx for idx, prob in enumerate(probs[:, label_index]) if prob >= min_probability]
+):
+
+    scores = probs[:, label_index]
+
+    # Prefer high confidence vulnerability cases
+    indices = np.where(
+        scores >= min_probability
+    )[0].tolist()
+
+    # If no positive samples,
+    # select highest confidence samples
     if not indices:
-        indices = list(np.argsort(probs[:, label_index])[-max_samples:][::-1])
+
+        indices = np.argsort(
+            scores
+        )[::-1].tolist()
+
+    # Remove duplicates and limit
     indices = indices[:max_samples]
-    selected_texts = [texts[idx] for idx in indices]
-    selected_records = [records[idx] for idx in indices]
-    selected_probs = probs[indices]
-    return selected_texts, selected_records, selected_probs
+
+    return (
+        [texts[i] for i in indices],
+        [records[i] for i in indices],
+        probs[indices]
+    )
 
 
 def main():
@@ -93,16 +107,17 @@ def main():
     parser.add_argument("--label", help=f"Target vulnerability label (default: Reentrancy). One of {VULN_TYPES}")
     parser.add_argument("--label-index", type=int, help="Target label index [0-6].")
     parser.add_argument("--max-samples", type=int, default=10, help="Max functions to explain.")
-    parser.add_argument("--background-samples", type=int, default=25, help="Background samples for SHAP.")
+    parser.add_argument("--background-samples", type=int, default=50, help="Background samples for SHAP")
     parser.add_argument("--background-split", choices=["train", "val", "test"], default="train")
-    parser.add_argument("--min-probability", type=float, default=0.5, help="Prefer samples above this predicted probability.")
-    parser.add_argument("--max-evals", type=int, default=100, help="SHAP max_evals (lower = faster).")
+    parser.add_argument("--min-probability", type=float, default=0.2, help="Prefer samples above this predicted probability.")
+    parser.add_argument("--max-evals", type=int, default=300, help="SHAP max_evals (lower = faster).")
     parser.add_argument("--output-dir", help="Output directory (default: <run-dir>/shap).")
     parser.add_argument("--device", help="Torch device for codebert/hybrid, e.g. cpu or cuda")
     parser.add_argument("--contract-root", help="Project root for resolving contract_file paths.")
     parser.add_argument("--contracts-dir", help="Path to contract_dataset_ethereum if not under cwd.")
     parser.add_argument("--fallback-only", action="store_true", help="Regex-only extraction for --sol-file.")
     args = parser.parse_args()
+    np.random.seed(17)
 
     require_shap()
     label_name, label_index = _resolve_label(args.label, args.label_index)
@@ -214,9 +229,13 @@ def main():
         explanations = []
         for idx, (text, record) in enumerate(zip(selected_texts, selected_records)):
             print(f"[shap] Hybrid text-branch SHAP {idx + 1}/{len(selected_records)}: {record.get('function_name', '')}")
-            predict_fn = build_hybrid_text_predict_fn(model, record, label_index)
+            predict_label_logit, predict_probability = build_hybrid_text_predict_fn(
+                hybrid_model,
+                record,
+                label_index,
+            )
             sample_explanations = explain_text_model_label(
-                predict_label_proba=predict_fn,
+                predict_label_proba=predict_label_logit,
                 tokenizer=model.tokenizer,
                 texts=[text],
                 records=[record],

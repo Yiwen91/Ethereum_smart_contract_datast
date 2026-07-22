@@ -1,9 +1,13 @@
 #!/usr/bin/env python3
 """
-SHAP-based interpretability for experiment models (tabular, Random Forest, CodeBERT, hybrid).
+SHAP-based interpretability for experiment models.
 
-Hybrid explanations target the **semantic (text) branch** while holding the AST/CFG graph
-fixed per function — practical for thesis case studies and sample-level reports.
+Supports:
+- TF-IDF tabular models
+- CodeBERT text models
+- Hybrid CodeBERT + GNN models
+
+Designed for thesis-quality vulnerability explanation reports.
 """
 
 from __future__ import annotations
@@ -15,406 +19,1148 @@ from typing import Any, Callable
 
 import numpy as np
 
+
 from experiment_utils import VULN_TYPES
+
 
 try:
     import shap
-
     _SHAP_AVAILABLE = True
-except ImportError:  # pragma: no cover
+except ImportError:
     shap = None
     _SHAP_AVAILABLE = False
 
+
 try:
     import matplotlib.pyplot as plt
-
     _MPL_AVAILABLE = True
-except ImportError:  # pragma: no cover
+except ImportError:
     plt = None
     _MPL_AVAILABLE = False
 
 
-def require_shap() -> None:
+
+# ============================================================
+# SHAP REQUIREMENT
+# ============================================================
+
+def require_shap():
+
     if not _SHAP_AVAILABLE:
         raise ImportError(
-            "SHAP is not installed. Install dependencies with: pip install shap matplotlib"
+            "Install SHAP first:\n"
+            "pip install shap matplotlib"
         )
 
 
+
+# ============================================================
+# TOKEN PROCESSING
+# ============================================================
+
+
 def _clean_token(token: str) -> str:
-    """Normalize a BPE subword token to a human-readable form for thesis output.
-
-    RoBERTa/CodeBERT use 'Ġ' for a leading space and 'Ċ' for a newline.
     """
-    cleaned = token.replace("Ġ", "").replace("Ċ", "").replace("ĉ", "").strip()
-    return cleaned
+    Convert CodeBERT tokens into readable source code tokens.
+    """
+
+    token = (
+        token
+        .replace("Ġ", "")
+        .replace("Ċ", "")
+        .replace("ĉ", "")
+        .strip()
+    )
+
+    return token
 
 
-_PUNCT_ONLY = set("()[]{}.,;:+-*/%=<>!&|^~?@#\"'`\\ ")
+
+# Tokens that are not useful for thesis interpretation.
+# They are ignored only in visualization.
+_DISPLAY_IGNORE = {
+
+    # variable names
+    "a",
+    "b",
+    "c",
+    "i",
+    "j",
+
+    # Solidity primitive fragments
+    "uint",
+    "uint256",
+    "bytes",
+    "bytes32",
+
+    # numbers
+    "0",
+    "1",
+    "2",
+    "32",
+    "256",
+
+    # punctuation
+    "_",
+
+    # CodeBERT artifacts
+    "<s>",
+    "</s>",
+    "<pad>",
+}
+
+
+
+_PUNCT_ONLY = set(
+    "()[]{}.,;:+-*/%=<>!&|^~?@#\"'`\\ "
+)
+
 
 
 def _is_meaningful_token(token: str) -> bool:
-    """Filter out empty / pure-punctuation tokens that are not informative."""
+
     if not token:
         return False
+
+    if token in _DISPLAY_IGNORE:
+        return False
+
     if all(ch in _PUNCT_ONLY for ch in token):
         return False
+
     return True
+
+
+
+# ============================================================
+# BPE MERGING
+# ============================================================
+
+
+def merge_bpe_tokens(tokens:list[str]) -> list[str]:
+    """
+    Merge CodeBERT BPE tokens.
+
+    Example:
+
+    ["msg", ".", "sender"]
+          |
+          v
+
+    ["msg.sender"]
+
+    """
+
+    merged = []
+
+    current = ""
+
+
+    for token in tokens:
+
+        token = str(token)
+
+
+        # New word begins
+        if token.startswith("Ġ"):
+
+            if current:
+                merged.append(current)
+
+            current = token.replace("Ġ", "")
+
+
+        else:
+
+            current += token.replace("Ċ", "")
+
+
+    if current:
+        merged.append(current)
+
+
+    return merged
+# ============================================================
+# DATA STRUCTURES
+# ============================================================
 
 
 @dataclass
 class TokenAttribution:
+
     token: str
     shap_value: float
 
 
+
 @dataclass
 class FeatureAttribution:
+
     feature: str
     shap_value: float
 
 
+
 @dataclass
 class SampleShapExplanation:
+
     sample_index: int
+
     contract_file: str
+
     function_name: str
+
     label: str
+
     predicted_probability: float
+
     base_value: float
-    attributions: list[TokenAttribution] | list[FeatureAttribution]
+
+    attributions: list[
+        TokenAttribution |
+        FeatureAttribution
+    ]
+
     explanation_type: str
+
     function_code_preview: str = ""
+
 
 
 @dataclass
 class ShapRunSummary:
+
     model: str
+
     run_dir: str
+
     label: str
+
     num_samples: int
+
     num_explained: int
+
     background_samples: int
+
     max_evals: int | None
-    samples: list[SampleShapExplanation] = field(default_factory=list)
-    top_global_tokens: list[dict[str, Any]] = field(default_factory=list)
+
+    samples: list[SampleShapExplanation] = field(
+        default_factory=list
+    )
+
+    top_global_tokens: list[dict[str,Any]] = field(
+        default_factory=list
+    )
+
+
+
+# ============================================================
+# ATTRIBUTION PROCESSING
+# ============================================================
 
 
 def _top_attributions(
-    items: list[TokenAttribution] | list[FeatureAttribution],
-    *,
-    limit: int = 15,
-) -> list[dict[str, Any]]:
-    ranked = sorted(items, key=lambda item: abs(item.shap_value), reverse=True)[:limit]
-    if not ranked:
-        return []
-    if isinstance(ranked[0], TokenAttribution):
-        return [{"token": item.token, "shap_value": float(item.shap_value)} for item in ranked]
-    return [{"feature": item.feature, "shap_value": float(item.shap_value)} for item in ranked]
+    items,
+    limit:int = 15
+):
+
+    ranked = sorted(
+        items,
+        key=lambda x: abs(x.shap_value),
+        reverse=True
+    )[:limit]
 
 
-def _global_token_importance(samples: list[SampleShapExplanation], limit: int = 25) -> list[dict[str, Any]]:
-    scores: dict[str, float] = {}
-    counts: dict[str, int] = {}
-    for sample in samples:
-        if sample.explanation_type != "text_tokens":
-            continue
-        for item in sample.attributions:
-            assert isinstance(item, TokenAttribution)
-            scores[item.token] = scores.get(item.token, 0.0) + abs(item.shap_value)
-            counts[item.token] = counts.get(item.token, 0) + 1
-    ranked = sorted(scores.items(), key=lambda pair: pair[1], reverse=True)[:limit]
-    return [
-        {
-            "token": token,
-            "mean_abs_shap": float(score / max(counts[token], 1)),
-            "count": counts[token],
-        }
-        for token, score in ranked
+    output = []
+
+
+    for item in ranked:
+
+        if isinstance(item, TokenAttribution):
+
+            output.append(
+                {
+                    "token":item.token,
+                    "shap_value":float(item.shap_value)
+                }
+            )
+
+        else:
+
+            output.append(
+                {
+                    "feature":item.feature,
+                    "shap_value":float(item.shap_value)
+                }
+            )
+
+
+    return output
+
+
+
+def _split_attributions(
+    items,
+    limit:int = 10
+):
+
+    positive = [
+        x for x in items
+        if x.shap_value > 0
     ]
 
 
-def explain_tabular_label(
-    model,
-    *,
-    texts: list[str],
-    label: str,
-    label_index: int,
-    background_texts: list[str],
-    max_evals: int | None = 500,
-) -> list[SampleShapExplanation]:
-    require_shap()
-    from models_tabular import _ConstantLabelModel
+    negative = [
+        x for x in items
+        if x.shap_value < 0
+    ]
 
-    label_model = model.models[label_index]
-    if isinstance(label_model, _ConstantLabelModel):
-        return []
 
-    background = model.transform(background_texts)
-    if background.shape[0] == 0:
-        raise ValueError("Background set is empty for tabular SHAP.")
+    positive = sorted(
+        positive,
+        key=lambda x:x.shap_value,
+        reverse=True
+    )[:limit]
 
-    def predict_positive(features_matrix) -> np.ndarray:
-        if hasattr(features_matrix, "toarray"):
-            dense = features_matrix.toarray()
-        else:
-            dense = np.asarray(features_matrix)
-        if dense.ndim == 1:
-            dense = dense.reshape(1, -1)
-        return label_model.predict_proba(dense)[:, 1]
 
-    explainer = shap.Explainer(predict_positive, background, max_evals=max_evals)
-    features = model.transform(texts)
-    shap_values = explainer(features)
+    negative = sorted(
+        negative,
+        key=lambda x:x.shap_value
+    )[:limit]
 
-    if hasattr(shap_values, "values"):
-        values = np.asarray(shap_values.values)
-        base_values = np.asarray(shap_values.base_values)
-    else:
-        values = np.asarray(shap_values)
-        base_values = np.zeros(values.shape[0], dtype=np.float32)
 
-    feature_names = np.asarray(model.vectorizer.get_feature_names_out())
-    if values.ndim == 3:
-        values = values[:, :, 1]
-        base_values = base_values[:, 1] if base_values.ndim > 1 else base_values
 
-    explanations: list[SampleShapExplanation] = []
-    probs = model.predict_proba(texts)[:, label_index]
-    for idx in range(len(texts)):
-        row_values = values[idx]
-        top_indices = np.argsort(np.abs(row_values))[-20:][::-1]
-        attributions = [
-            FeatureAttribution(feature=str(feature_names[j]), shap_value=float(row_values[j]))
-            for j in top_indices
-            if abs(float(row_values[j])) > 1e-8
-        ]
-        explanations.append(
-            SampleShapExplanation(
-                sample_index=idx,
-                contract_file="",
-                function_name="",
-                label=label,
-                predicted_probability=float(probs[idx]),
-                base_value=float(base_values[idx]) if np.ndim(base_values) else float(base_values),
-                attributions=attributions,
-                explanation_type="tfidf_features",
-                function_code_preview=texts[idx][:500],
+    def convert(item):
+
+        if isinstance(item,TokenAttribution):
+
+            return {
+                "token":item.token,
+                "shap_value":float(item.shap_value)
+            }
+
+
+        return {
+            "feature":item.feature,
+            "shap_value":float(item.shap_value)
+        }
+
+
+    return (
+        [convert(x) for x in positive],
+        [convert(x) for x in negative]
+    )
+
+
+
+# ============================================================
+# GLOBAL SHAP IMPORTANCE
+# ============================================================
+
+
+def _global_token_importance(
+    samples:list[SampleShapExplanation],
+    limit:int = 25
+):
+
+    scores = {}
+
+    counts = {}
+
+
+    for sample in samples:
+
+
+        if sample.explanation_type != "text_tokens":
+            continue
+
+
+
+        for item in sample.attributions:
+
+
+            if not isinstance(
+                item,
+                TokenAttribution
+            ):
+                continue
+
+
+
+            token = item.token
+
+
+            scores[token] = (
+                scores.get(token,0)
+                +
+                abs(item.shap_value)
             )
-        )
-    return explanations
+
+
+            counts[token] = (
+                counts.get(token,0)
+                +1
+            )
+
+
+
+    ranked = sorted(
+        scores.items(),
+        key=lambda x:x[1],
+        reverse=True
+    )[:limit]
+
+
+
+    return [
+
+        {
+            "token":token,
+
+            "mean_abs_shap":
+                float(
+                    score /
+                    max(counts[token],1)
+                ),
+
+            "count":
+                counts[token]
+        }
+
+        for token,score in ranked
+    ]
+# ============================================================
+# TEXT MODEL SHAP EXPLANATION
+# ============================================================
 
 
 def explain_text_model_label(
     *,
     predict_label_proba: Callable[[list[str]], np.ndarray],
     tokenizer,
-    texts: list[str],
-    records: list[dict],
-    label: str,
-    label_index: int,
-    background_texts: list[str],
-    max_evals: int | None = 100,
-) -> list[SampleShapExplanation]:
+    texts:list[str],
+    records:list[dict],
+    label:str,
+    label_index:int,
+    background_texts:list[str],
+    max_evals:int | None = 300,
+):
+
     require_shap()
 
-    masker = shap.maskers.Text(tokenizer, mask_token="...")
 
-    def _predict_for_shap(masked_texts) -> np.ndarray:
-        probs = predict_label_proba(list(masked_texts))
-        return np.asarray(probs, dtype=np.float32).reshape(-1)
+    masker = shap.maskers.Text(
+        tokenizer,
+        mask_token="..."
+    )
 
-    # Single scalar output per sample — do not pass output_names (SHAP 0.4x asserts otherwise).
-    explainer = shap.Explainer(_predict_for_shap, masker)
 
-    shap_values = explainer(texts, max_evals=max_evals)
-    if hasattr(shap_values, "values"):
-        values = np.asarray(shap_values.values)
-        base_values = np.asarray(shap_values.base_values)
-    else:
-        values = np.asarray(shap_values)
-        base_values = np.zeros(len(texts), dtype=np.float32)
+
+    def predict_for_shap(masked_texts):
+
+        probs = predict_label_proba(
+            list(masked_texts)
+        )
+
+        return np.asarray(
+            probs,
+            dtype=np.float32
+        )
+
+
+
+    explainer = shap.Explainer(
+        predict_for_shap,
+        masker
+    )
+
+
+    shap_values = explainer(
+        texts,
+        max_evals=max_evals
+    )
+
+
+
+    values = np.asarray(
+        shap_values.values
+    )
+
+
+    base_values = np.asarray(
+        shap_values.base_values
+    )
+
+
 
     probs = predict_label_proba(texts)
-    explanations: list[SampleShapExplanation] = []
-    for idx, text in enumerate(texts):
-        token_attrs: list[TokenAttribution] = []
+
+
+
+    explanations = []
+
+
+
+    for idx,text in enumerate(texts):
+
+
+        # SHAP output shape handling
         if values.ndim == 3:
-            row = values[idx, :, 0]
+
+            row_values = values[idx,:,0]
+
         else:
-            row = values[idx]
+
+            row_values = values[idx]
+
+
+
         encoded = tokenizer(
             text,
             truncation=True,
-            max_length=getattr(tokenizer, "model_max_length", 512),
-            return_tensors=None,
+            max_length=getattr(
+                tokenizer,
+                "model_max_length",
+                512
+            ),
+            return_tensors=None
         )
-        tokens = tokenizer.convert_ids_to_tokens(encoded["input_ids"])
 
-        limit = min(len(tokens), len(row))
-        for token_idx in range(limit):
-            raw_token = str(tokens[token_idx])
-            cleaned = _clean_token(raw_token)
-            if not _is_meaningful_token(cleaned):
+
+        raw_tokens = tokenizer.convert_ids_to_tokens(
+            encoded["input_ids"]
+        )
+
+
+
+        tokens = merge_bpe_tokens(
+            raw_tokens
+        )
+
+
+
+        # ------------------------------------------------
+        # Aggregate subword SHAP values
+        # ------------------------------------------------
+
+        aggregated = {}
+
+        token_count = min(
+            len(tokens),
+            len(row_values)
+        )
+
+
+
+        for token_index in range(token_count):
+
+
+            token = _clean_token(
+                tokens[token_index]
+            )
+
+
+            if not _is_meaningful_token(token):
                 continue
-            if cleaned in ("<s>", "</s>", "<pad>", "...", "s", "/s", "pad"):
-                continue
+
+
+
+            shap_value = float(
+                row_values[token_index]
+            )
+
+
+
+            if token in aggregated:
+
+                aggregated[token] += shap_value
+
+            else:
+
+                aggregated[token] = shap_value
+
+
+
+        token_attrs = []
+
+
+        for token,value in aggregated.items():
+
             token_attrs.append(
-                TokenAttribution(token=cleaned, shap_value=float(row[token_idx]))
+                TokenAttribution(
+                    token=token,
+                    shap_value=value
+                )
             )
 
-        record = records[idx] if idx < len(records) else {}
+
+
+        token_attrs = sorted(
+            token_attrs,
+            key=lambda x:
+                abs(x.shap_value),
+            reverse=True
+        )[:30]
+
+
+
+        record = (
+            records[idx]
+            if idx < len(records)
+            else {}
+        )
+
+
+
         explanations.append(
+
             SampleShapExplanation(
+
                 sample_index=idx,
-                contract_file=str(record.get("contract_file", "")),
-                function_name=str(record.get("function_name", "")),
+
+                contract_file=str(
+                    record.get(
+                        "contract_file",
+                        ""
+                    )
+                ),
+
+                function_name=str(
+                    record.get(
+                        "function_name",
+                        ""
+                    )
+                ),
+
                 label=label,
-                predicted_probability=float(probs[idx]),
-                base_value=float(base_values[idx]) if np.ndim(base_values) else float(base_values),
-                attributions=sorted(token_attrs, key=lambda item: abs(item.shap_value), reverse=True)[:30],
-                explanation_type="text_tokens",
-                function_code_preview=text[:500],
+
+
+                predicted_probability=float(
+                    probs[idx]
+                ),
+
+
+                base_value=float(
+                    base_values[idx]
+                )
+                if np.ndim(base_values)
+                else float(base_values),
+
+
+                attributions=token_attrs,
+
+
+                explanation_type=
+                    "text_tokens",
+
+
+                function_code_preview=
+                    text[:500]
             )
         )
+
+
+
     return explanations
+# ============================================================
+# HYBRID MODEL SHAP
+# ============================================================
 
 
-def build_hybrid_text_predict_fn(hybrid_model, record: dict, label_index: int):
-    """Predict one label probability while varying text; graph + cross-contract fixed."""
+def build_hybrid_text_predict_fn(
+    hybrid_model,
+    record:dict,
+    label_index:int
+):
+
+    """
+    Explain only the text branch.
+
+    Graph features remain fixed.
+    """
+
     import torch
 
+
+
     assert hybrid_model.model is not None
+
+
+
     base_batch = hybrid_model._collate(
-        [{"record": record, "labels": np.zeros((1, hybrid_model.model.num_labels), dtype=np.float32)}]
+        [
+            {
+                "record":record,
+                "labels":
+                    np.zeros(
+                        (
+                            1,
+                            hybrid_model.model.num_labels
+                        ),
+                        dtype=np.float32
+                    )
+            }
+        ]
     )
 
-    def predict_label_proba(texts: list[str]) -> np.ndarray:
+
+
+    def predict_logit(texts:list[str]):
+
+
         encoded = hybrid_model.tokenizer(
             texts,
             truncation=True,
             padding=True,
             max_length=hybrid_model.max_length,
-            return_tensors="pt",
+            return_tensors="pt"
         )
 
-        batch_size = len(texts)
 
-        batch = {
-            "input_ids": encoded["input_ids"].to(hybrid_model.device),
-            "attention_mask": encoded["attention_mask"].to(hybrid_model.device),
 
-            "x": base_batch["x"]
-                    .repeat(batch_size, 1, 1)
-                    .to(hybrid_model.device),
+        batch_size=len(texts)
 
-            "adj": base_batch["adj"]
-                    .repeat(batch_size, 1, 1)
-                    .to(hybrid_model.device),
 
-            "mask": base_batch["mask"]
-                    .repeat(batch_size, 1)
-                    .to(hybrid_model.device),
+
+        batch={
+
+            "input_ids":
+                encoded["input_ids"]
+                .to(hybrid_model.device),
+
+
+            "attention_mask":
+                encoded["attention_mask"]
+                .to(hybrid_model.device),
+
+
+            "x":
+                base_batch["x"]
+                .repeat(
+                    batch_size,
+                    1,
+                    1
+                )
+                .to(hybrid_model.device),
+
+
+            "adj":
+                base_batch["adj"]
+                .repeat(
+                    batch_size,
+                    1,
+                    1
+                )
+                .to(hybrid_model.device),
+
+
+            "mask":
+                base_batch["mask"]
+                .repeat(
+                    batch_size,
+                    1,
+                    1
+                )
+                .to(hybrid_model.device),
+
         }
 
+
+
         if "cross_contract" in base_batch:
+
             batch["cross_contract"] = (
                 base_batch["cross_contract"]
-                    .repeat(batch_size, 1)
-                    .to(hybrid_model.device)
+                .repeat(
+                    batch_size,
+                    1
+                )
+                .to(hybrid_model.device)
             )
+
 
 
         hybrid_model.model.eval()
 
+
+
         with torch.no_grad():
-            logits = hybrid_model.model(**batch)
-            probs = torch.sigmoid(logits)[:, label_index]
 
-        return probs.cpu().numpy().astype(np.float32)
-
-    return predict_label_proba
+            logits = hybrid_model.model(
+                **batch
+            )
 
 
-def save_shap_summary(summary: ShapRunSummary, output_dir: Path) -> Path:
-    output_dir.mkdir(parents=True, exist_ok=True)
-    payload = {
-        "model": summary.model,
-        "run_dir": summary.run_dir,
-        "label": summary.label,
-        "num_samples": summary.num_samples,
-        "num_explained": summary.num_explained,
-        "background_samples": summary.background_samples,
-        "max_evals": summary.max_evals,
-        "top_global_tokens": summary.top_global_tokens,
-        "samples": [
+        return (
+            logits[:,label_index]
+            .cpu()
+            .numpy()
+            .astype(np.float32)
+        )
+
+
+
+    def predict_probability(texts):
+
+        logits = predict_logit(texts)
+
+        return (
+            1 /
+            (
+                1 +
+                np.exp(-logits)
+            )
+        )
+
+
+
+    return (
+        predict_logit,
+        predict_probability
+    )
+
+
+
+# ============================================================
+# SAVE REPORT
+# ============================================================
+
+
+def save_shap_summary(
+    summary:ShapRunSummary,
+    output_dir:Path
+):
+
+    output_dir.mkdir(
+        parents=True,
+        exist_ok=True
+    )
+
+
+
+    payload={
+
+        "model":
+            summary.model,
+
+        "run_dir":
+            summary.run_dir,
+
+        "label":
+            summary.label,
+
+        "num_samples":
+            summary.num_samples,
+
+        "num_explained":
+            summary.num_explained,
+
+        "background_samples":
+            summary.background_samples,
+
+        "max_evals":
+            summary.max_evals,
+
+
+        "top_global_tokens":
+            summary.top_global_tokens,
+
+
+        "samples":[
+
             {
                 **asdict(sample),
-                "top_attributions": _top_attributions(sample.attributions),
+
+                "top_attributions":
+                    _top_attributions(
+                        sample.attributions
+                    )
+
             }
+
             for sample in summary.samples
-        ],
+        ]
     }
-    json_path = output_dir / "shap_summary.json"
-    json_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
 
-    report_lines = [
-        "# SHAP Explanation Report",
-        "",
-        f"- Model: `{summary.model}`",
-        f"- Run: `{summary.run_dir}`",
-        f"- Target label: `{summary.label}`",
-        f"- Samples explained: `{summary.num_explained}` / `{summary.num_samples}`",
-        "",
-        "## Global influential tokens/features",
-        "",
-    ]
-    for item in summary.top_global_tokens[:15]:
-        if "token" in item:
-            report_lines.append(
-                f"- `{item['token']}`: mean |SHAP| = {item['mean_abs_shap']:.6f} (n={item['count']})"
-            )
-        else:
-            report_lines.append(f"- `{item}`")
 
-    report_lines.append("")
-    for sample in summary.samples[:10]:
-        report_lines.extend(
-            [
-                f"## {sample.function_name or 'function'} (sample {sample.sample_index})",
-                "",
-                f"- Contract: `{sample.contract_file}`",
-                f"- P({sample.label}) = {sample.predicted_probability:.4f}",
-                f"- Base value: {sample.base_value:.4f}",
-                "",
-                "Top attributions:",
-                "",
-            ]
+
+    json_path = (
+        output_dir /
+        "shap_summary.json"
+    )
+
+
+    json_path.write_text(
+        json.dumps(
+            payload,
+            indent=2
+        ),
+        encoding="utf-8"
+    )
+
+
+
+    lines=[]
+
+
+    lines.append(
+        "# SHAP Explanation Report"
+    )
+
+    lines.append("")
+
+
+    lines.append(
+        f"Model: {summary.model}"
+    )
+
+
+    lines.append(
+        f"Target vulnerability: {summary.label}"
+    )
+
+
+    lines.append(
+        f"Samples explained: "
+        f"{summary.num_explained}"
+        f"/{summary.num_samples}"
+    )
+
+
+    lines.append("")
+
+
+    lines.append(
+        "## Global Feature Importance"
+    )
+
+
+    lines.append("")
+
+
+
+    for item in summary.top_global_tokens[:20]:
+
+        lines.append(
+
+            f"- **{item['token']}** "
+            f"| mean SHAP="
+            f"{item['mean_abs_shap']:.6f} "
+            f"(n={item['count']})"
+
         )
-        for item in _top_attributions(sample.attributions, limit=10):
-            if "token" in item:
-                report_lines.append(f"- `{item['token']}`: {item['shap_value']:+.6f}")
-            else:
-                report_lines.append(f"- `{item['feature']}`: {item['shap_value']:+.6f}")
-        report_lines.append("")
 
-    (output_dir / "shap_report.md").write_text("\n".join(report_lines), encoding="utf-8")
+
+
+    for sample in summary.samples:
+
+
+        lines.extend(
+
+            [
+
+            "",
+
+            "---",
+
+            "",
+
+            f"## Function: "
+            f"{sample.function_name}",
+
+
+            f"Prediction:"
+            f" {sample.predicted_probability:.4f}",
+
+
+            "",
+
+            "### Increasing vulnerability"
+
+            ]
+
+        )
+
+
+
+        positive,negative = (
+            _split_attributions(
+                sample.attributions
+            )
+        )
+
+
+        for item in positive:
+
+            name = (
+                item.get("token")
+                or
+                item.get("feature")
+            )
+
+            lines.append(
+                f"+ {name}: "
+                f"{item['shap_value']:+.6f}"
+            )
+
+
+
+        lines.append("")
+
+
+        lines.append(
+            "### Reducing vulnerability"
+        )
+
+
+        for item in negative:
+
+            name = (
+                item.get("token")
+                or
+                item.get("feature")
+            )
+
+            lines.append(
+                f"- {name}: "
+                f"{item['shap_value']:+.6f}"
+            )
+
+
+
+    report_path = (
+        output_dir /
+        "shap_report.md"
+    )
+
+
+    report_path.write_text(
+        "\n".join(lines),
+        encoding="utf-8"
+    )
+
+
     return json_path
 
 
-def plot_sample_bar(sample: SampleShapExplanation, output_path: Path, limit: int = 12) -> None:
+
+# ============================================================
+# PLOT
+# ============================================================
+
+
+def plot_sample_bar(
+    sample:SampleShapExplanation,
+    output_path:Path,
+    limit:int=12
+):
+
     if not _MPL_AVAILABLE:
         return
-    top = _top_attributions(sample.attributions, limit=limit)
+
+
+
+    top=_top_attributions(
+        sample.attributions,
+        limit
+    )
+
+
     if not top:
         return
-    labels = [item.get("token") or item.get("feature") or "?" for item in top][::-1]
-    values = [item["shap_value"] for item in top][::-1]
-    fig, axis = plt.subplots(figsize=(8, max(3, len(labels) * 0.35)))
-    axis.barh(labels, values, color=["#c44e52" if value > 0 else "#4c72b0" for value in values])
-    axis.set_title(f"SHAP — {sample.label} — {sample.function_name}")
-    axis.set_xlabel("SHAP value")
+
+
+
+    labels=[
+
+        x.get("token")
+        or
+        x.get("feature")
+
+        for x in top
+
+    ]
+
+
+    values=[
+
+        x["shap_value"]
+
+        for x in top
+
+    ]
+
+
+
+    labels=labels[::-1]
+
+    values=values[::-1]
+
+
+
+    fig,ax=plt.subplots(
+
+        figsize=(
+            8,
+            max(
+                4,
+                len(labels)*0.35
+            )
+        )
+
+    )
+
+
+
+    colors=[
+
+        "#d62728"
+        if x>0
+        else
+        "#1f77b4"
+
+        for x in values
+
+    ]
+
+
+
+    ax.barh(
+        labels,
+        values,
+        color=colors
+    )
+
+
+    ax.axvline(
+        0,
+        color="black",
+        linewidth=0.8
+    )
+
+
+    ax.set_xlabel(
+        "SHAP contribution"
+    )
+
+
+    ax.set_title(
+        f"{sample.function_name} - "
+        f"{sample.label}"
+    )
+
+
     fig.tight_layout()
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    fig.savefig(output_path, dpi=150)
+
+
+    output_path.parent.mkdir(
+        parents=True,
+        exist_ok=True
+    )
+
+    fig.savefig(
+        output_path,
+        dpi=300
+    )
+
     plt.close(fig)
