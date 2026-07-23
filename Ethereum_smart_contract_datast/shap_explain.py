@@ -117,69 +117,70 @@ _PUNCT_ONLY = set(
 
 
 
-def _is_meaningful_token(token: str) -> bool:
+def _is_meaningful_token(token):
 
     if not token:
         return False
 
-    if token in _DISPLAY_IGNORE:
+
+    if len(token) <= 1:
         return False
 
-    if all(ch in _PUNCT_ONLY for ch in token):
+
+    if all(
+        ch in _PUNCT_ONLY
+        for ch in token
+    ):
         return False
+
+
+    bad_tokens = {
+        "true",
+        "false",
+        "null",
+        "memory",
+        "public",
+        "external",
+        "internal",
+        "private",
+    }
+
+
+    if token in bad_tokens:
+        return False
+
 
     return True
-
-
 
 # ============================================================
 # BPE MERGING
 # ============================================================
 
 
-def merge_bpe_tokens(tokens:list[str]) -> list[str]:
-    """
-    Merge CodeBERT BPE tokens.
-
-    Example:
-
-    ["msg", ".", "sender"]
-          |
-          v
-
-    ["msg.sender"]
-
-    """
+def merge_bpe_tokens(tokens):
 
     merged = []
 
-    current = ""
-
-
     for token in tokens:
 
-        token = str(token)
+        token = (
+            token
+            .replace("Ġ", "")
+            .replace("Ċ", "")
+        )
 
+        if token in [
+            "<s>",
+            "</s>",
+            "<pad>"
+        ]:
+            continue
 
-        # New word begins
-        if token.startswith("Ġ"):
-
-            if current:
-                merged.append(current)
-
-            current = token.replace("Ġ", "")
-
-
-        else:
-
-            current += token.replace("Ċ", "")
-
-
-    if current:
-        merged.append(current)
-
+        if token:
+            merged.append(token)
 
     return merged
+
 # ============================================================
 # DATA STRUCTURES
 # ============================================================
@@ -359,76 +360,59 @@ def _split_attributions(
 
 
 def _global_token_importance(
-    samples:list[SampleShapExplanation],
-    limit:int = 25
+    samples,
+    limit=25
 ):
 
-    scores = {}
-
-    counts = {}
-
+    scores={}
+    counts={}
 
     for sample in samples:
-
 
         if sample.explanation_type != "text_tokens":
             continue
 
-
+        seen=set()
 
         for item in sample.attributions:
 
+            token=item.token
 
-            if not isinstance(
-                item,
-                TokenAttribution
-            ):
-                continue
-
-
-
-            token = item.token
-
-
-            scores[token] = (
+            scores[token]=(
                 scores.get(token,0)
                 +
                 abs(item.shap_value)
             )
 
+            if token not in seen:
+                counts[token]=(
+                    counts.get(token,0)+1
+                )
 
-            counts[token] = (
-                counts.get(token,0)
-                +1
-            )
+                seen.add(token)
 
-
-
-    ranked = sorted(
+    ranked=sorted(
         scores.items(),
         key=lambda x:x[1],
         reverse=True
     )[:limit]
 
-
-
     return [
-
         {
             "token":token,
-
             "mean_abs_shap":
                 float(
-                    score /
-                    max(counts[token],1)
+                    scores[token]
+                    /
+                    counts[token]
                 ),
-
             "count":
                 counts[token]
         }
 
-        for token,score in ranked
+        for token,_ in ranked
     ]
+
 # ============================================================
 # TEXT MODEL SHAP EXPLANATION
 # ============================================================
@@ -1007,13 +991,9 @@ def save_shap_summary(
             f"| mean SHAP="
             f"{item['mean_abs_shap']:.6f} "
             f"(n={item['count']})"
-
         )
 
-
-
     for sample in summary.samples:
-
 
         lines.extend(
 
@@ -1029,26 +1009,19 @@ def save_shap_summary(
             f"{sample.function_name}",
 
 
-            f"Prediction:"
-            f" {sample.predicted_probability:.4f}",
-
+            f"P({sample.label}) = {sample.predicted_probability:.4f}",  
 
             "",
 
             "### Increasing vulnerability"
-
             ]
-
         )
-
-
 
         positive,negative = (
             _split_attributions(
                 sample.attributions
             )
         )
-
 
         for item in positive:
 
@@ -1063,15 +1036,11 @@ def save_shap_summary(
                 f"{item['shap_value']:+.6f}"
             )
 
-
-
         lines.append("")
-
 
         lines.append(
             "### Reducing vulnerability"
         )
-
 
         for item in negative:
 
