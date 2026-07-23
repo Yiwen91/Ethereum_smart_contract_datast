@@ -200,17 +200,14 @@ def merge_bpe_tokens(tokens):
 class TokenAttribution:
 
     token: str
+    position: int
     shap_value: float
-
-
 
 @dataclass
 class FeatureAttribution:
 
     feature: str
     shap_value: float
-
-
 
 @dataclass
 class SampleShapExplanation:
@@ -235,8 +232,6 @@ class SampleShapExplanation:
     explanation_type: str
 
     function_code_preview: str = ""
-
-
 
 @dataclass
 class ShapRunSummary:
@@ -288,6 +283,7 @@ def _top_attributions(
     for item in ranked:
 
         if isinstance(item, TokenAttribution):
+
             output.append(
                 {
                     "token": item.token,
@@ -295,11 +291,13 @@ def _top_attributions(
                     "shap_value": float(item.shap_value)
                 }
             )
+
         else:
+
             output.append(
                 {
-                    "feature":item.feature,
-                    "shap_value":float(item.shap_value)
+                    "feature": item.feature,
+                    "shap_value": float(item.shap_value)
                 }
             )
 
@@ -334,18 +332,17 @@ def _split_attributions(
 
     def convert(item):
 
-        if isinstance(item,TokenAttribution):
+        if isinstance(item, TokenAttribution):
 
             return {
-                "token":item.token,
-                "shap_value":float(item.shap_value)
+                "token": item.token,
+                "position": item.position,
+                "shap_value": float(item.shap_value)
             }
-
         return {
-            "feature":item.feature,
-            "shap_value":float(item.shap_value)
+            "feature": item.feature,
+            "shap_value": float(item.shap_value)
         }
-
     return (
         [convert(x) for x in positive],
         [convert(x) for x in negative]
@@ -357,42 +354,39 @@ def _split_attributions(
 
 def _global_token_importance(samples, limit=20):
 
-    scores = {}
-    counts = {}
+    scores = []
+    count = 0
 
     for sample in samples:
 
         for item in sample.attributions:
 
-            token = item.token
+            if not isinstance(item, TokenAttribution):
+                continue
 
-            if token in _DISPLAY_IGNORE:
+            if item.token in _DISPLAY_IGNORE:
                 continue
 
             if abs(item.shap_value) < 1e-4:
                 continue
 
-            scores[token] = scores.get(token, 0.0) + abs(item.shap_value)
-            counts[token] = counts.get(token, 0) + 1
+            scores.append(
+                {
+                    "token": item.token,
+                    "position": item.position,
+                    "mean_abs_shap": abs(item.shap_value),
+                    "count": 1
+                }
+            )
 
-    ranked = sorted(
-        scores.items(),
-        key=lambda x: x[1] / counts[x[0]],
-        reverse=True,
+    scores = sorted(
+        scores,
+        key=lambda x: x["mean_abs_shap"],
+        reverse=True
     )
 
-    output = []
 
-    for token, score in ranked[:limit]:
-
-        output.append({
-            "token": token,
-            "mean_abs_shap": score / counts[token],
-            "count": counts[token],
-        })
-
-    return output
-
+    return scores[:limit]
 
 # ============================================================
 # TEXT MODEL SHAP EXPLANATION
@@ -580,11 +574,7 @@ def explain_text_model_label(
         encoded = tokenizer(
             text,
             truncation=True,
-            max_length=getattr(
-                tokenizer,
-                "model_max_length",
-                512
-            ),
+            max_length=512,
             return_tensors=None
         )
 
@@ -623,8 +613,8 @@ def explain_text_model_label(
             token_attrs.append(
                 TokenAttribution(
                     token=token,
-                    shap_value=shap_value,
                     position=token_index,
+                    shap_value=shap_value,
                 )
             )
 
@@ -721,14 +711,13 @@ def build_hybrid_text_predict_fn(
             list(masked_texts),
             truncation=True,
             padding=True,
-            max_length=hybrid_model.max_length,
+            max_length=min(
+                hybrid_model.max_length,
+                512
+            ),
             return_tensors="pt",
         )
-
-
         batch_size = len(masked_texts)
-
-
         batch = {
             "input_ids":
                 encoded["input_ids"]
