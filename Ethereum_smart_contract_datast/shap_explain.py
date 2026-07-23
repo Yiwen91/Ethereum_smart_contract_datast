@@ -81,40 +81,32 @@ _DISPLAY_IGNORE = {
     "_",
     "__",
 
-    "a",
-    "b",
-    "c",
-    "i",
-    "j",
-
-    "0",
-    "1",
-    "2",
-    "32",
-    "64",
-    "128",
-    "256",
-
     "[_",
     "(_",
-    "]",
-    "[",
-    "(",
-    ")",
-    "{",
-    "}",
+
+    "256",
+    "128",
+    "64",
+    "32",
 
     "ID",
     "Name",
     "Names",
 
-    "true",
-    "false",
+    "uint",
+    "int",
 
-    "external",
+    "address",
+
+    "function",
+
     "public",
     "private",
+    "external",
     "internal",
+
+    "true",
+    "false",
 }
 
 _PUNCT_ONLY = set(
@@ -377,7 +369,10 @@ def _global_token_importance(samples, limit=20):
             if token in _DISPLAY_IGNORE:
                 continue
 
-            scores[token] = scores.get(token, 0) + abs(item.shap_value)
+            if abs(item.shap_value) < 1e-4:
+                continue
+
+            scores[token] = scores.get(token, 0.0) + abs(item.shap_value)
             counts[token] = counts.get(token, 0) + 1
 
     ranked = sorted(
@@ -512,6 +507,7 @@ def explain_tabular_label(
                 explanation_type="tfidf_features",
                 function_code_preview=text[:500],
             )
+
         )
 
 
@@ -575,29 +571,21 @@ def explain_text_model_label(
         shap_values.base_values
     )
 
-
-
     probs = predict_label_proba(texts)
-
-
 
     explanations = []
 
-
-
     for idx,text in enumerate(texts):
-
 
         # SHAP output shape handling
         if values.ndim == 3:
-
             row_values = values[idx,:,0]
 
-        else:
-
+        elif values.ndim == 2:
             row_values = values[idx]
 
-
+        else:
+            row_values = values.reshape(-1)
 
         encoded = tokenizer(
             text,
@@ -610,83 +598,53 @@ def explain_text_model_label(
             return_tensors=None
         )
 
-
         raw_tokens = tokenizer.convert_ids_to_tokens(
             encoded["input_ids"]
         )
-
-
 
         tokens = merge_bpe_tokens(
             raw_tokens
         )
 
-
-
         # ------------------------------------------------
-        # Aggregate subword SHAP values
+        # Keep every token occurrence separately
         # ------------------------------------------------
-
-        aggregated = {}
 
         token_count = min(
             len(tokens),
             len(row_values)
         )
 
-
+        token_attrs = []
 
         for token_index in range(token_count):
 
-
-            token = _clean_token(
-                tokens[token_index]
-            )
-
+            token = _clean_token(tokens[token_index])
 
             if not _is_meaningful_token(token):
                 continue
 
+            shap_value = float(row_values[token_index])
 
-
-            shap_value = float(
-                row_values[token_index]
-            )
-
-
-
-            if token in aggregated:
-
-                aggregated[token] += shap_value
-
-            else:
-
-                aggregated[token] = shap_value
-
-
-
-        token_attrs = []
-
-
-        for token,value in aggregated.items():
+            # Ignore numerical noise
+            if abs(shap_value) < 1e-4:
+                continue
 
             token_attrs.append(
                 TokenAttribution(
-                    token=token,
-                    shap_value=value
+                    token=f"{token} [{token_index}]",
+                    shap_value=shap_value,
                 )
             )
 
+        # Sort by importance
+        token_attrs.sort(
+            key=lambda x: abs(x.shap_value),
+            reverse=True,
+        )
 
-
-        token_attrs = sorted(
-            token_attrs,
-            key=lambda x:
-                abs(x.shap_value),
-            reverse=True
-        )[:30]
-
-
+        # Keep the most important tokens
+        token_attrs = token_attrs[:30]
 
         record = (
             records[idx]
@@ -694,14 +652,9 @@ def explain_text_model_label(
             else {}
         )
 
-
-
         explanations.append(
-
             SampleShapExplanation(
-
                 sample_index=idx,
-
                 contract_file=str(
                     record.get(
                         "contract_file",
@@ -717,12 +670,9 @@ def explain_text_model_label(
                 ),
 
                 label=label,
-
-
                 predicted_probability=float(
                     probs[idx]
                 ),
-
 
                 base_value=float(
                     base_values[idx]
@@ -982,23 +932,15 @@ def save_shap_summary(
     for sample in summary.samples:
 
         lines.extend(
-
             [
-
             "",
-
             "---",
-
             "",
-
             f"## Function: "
             f"{sample.function_name}",
 
-
-            f"P({sample.label}) = {sample.predicted_probability:.4f}",  
-
+            f"P({sample.label}) = {sample.predicted_probability:.3f}",
             "",
-
             "### Increasing vulnerability"
             ]
         )
