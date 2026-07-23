@@ -81,32 +81,46 @@ _DISPLAY_IGNORE = {
     "_",
     "__",
 
-    "[_",
-    "(_",
-
-    "256",
-    "128",
-    "64",
-    "32",
-
-    "ID",
-    "Name",
-    "Names",
-
     "uint",
+    "uint8",
+    "uint16",
+    "uint32",
+    "uint40",
+    "uint64",
+    "uint128",
+    "uint256",
+
     "int",
+    "int8",
+    "int16",
+    "int32",
+    "int64",
+    "int128",
+    "int256",
 
     "address",
+    "bool",
+    "bytes",
+    "bytes32",
 
     "function",
+    "returns",
 
     "public",
     "private",
-    "external",
     "internal",
+    "external",
+
+    "pure",
+    "view",
+    "payable",
+
+    "memory",
+    "storage",
 
     "true",
     "false",
+
 }
 
 _PUNCT_ONLY = set(
@@ -274,16 +288,14 @@ def _top_attributions(
     for item in ranked:
 
         if isinstance(item, TokenAttribution):
-
             output.append(
                 {
-                    "token":item.token,
-                    "shap_value":float(item.shap_value)
+                    "token": item.token,
+                    "position": item.position,
+                    "shap_value": float(item.shap_value)
                 }
             )
-
         else:
-
             output.append(
                 {
                     "feature":item.feature,
@@ -291,10 +303,7 @@ def _top_attributions(
                 }
             )
 
-
     return output
-
-
 
 def _split_attributions(
     items,
@@ -303,15 +312,13 @@ def _split_attributions(
 
     positive = [
         x for x in items
-        if x.shap_value > 0
+        if x.shap_value > 1e-6
     ]
-
 
     negative = [
         x for x in items
-        if x.shap_value < 0
+        if x.shap_value < -1e-6
     ]
-
 
     positive = sorted(
         positive,
@@ -325,8 +332,6 @@ def _split_attributions(
         key=lambda x:x.shap_value
     )[:limit]
 
-
-
     def convert(item):
 
         if isinstance(item,TokenAttribution):
@@ -336,24 +341,19 @@ def _split_attributions(
                 "shap_value":float(item.shap_value)
             }
 
-
         return {
             "feature":item.feature,
             "shap_value":float(item.shap_value)
         }
-
 
     return (
         [convert(x) for x in positive],
         [convert(x) for x in negative]
     )
 
-
-
 # ============================================================
 # GLOBAL SHAP IMPORTANCE
 # ============================================================
-
 
 def _global_token_importance(samples, limit=20):
 
@@ -490,7 +490,6 @@ def explain_tabular_label(
                 )
             )
 
-
         explanations.append(
             SampleShapExplanation(
                 sample_index=idx,
@@ -509,7 +508,6 @@ def explain_tabular_label(
             )
 
         )
-
 
     return explanations
 
@@ -534,8 +532,6 @@ def explain_text_model_label(
         mask_token="..."
     )
 
-
-
     def predict_for_shap(masked_texts):
 
         probs = predict_label_proba(
@@ -547,25 +543,19 @@ def explain_text_model_label(
             dtype=np.float32
         )
 
-
-
     explainer = shap.Explainer(
         predict_for_shap,
         masker
     )
-
 
     shap_values = explainer(
         texts,
         max_evals=max_evals
     )
 
-
-
     values = np.asarray(
         shap_values.values
     )
-
 
     base_values = np.asarray(
         shap_values.base_values
@@ -627,13 +617,14 @@ def explain_text_model_label(
             shap_value = float(row_values[token_index])
 
             # Ignore numerical noise
-            if abs(shap_value) < 1e-4:
+            if abs(shap_value) < 1e-6:
                 continue
 
             token_attrs.append(
                 TokenAttribution(
-                    token=f"{token} [{token_index}]",
+                    token=token,
                     shap_value=shap_value,
+                    position=token_index,
                 )
             )
 
