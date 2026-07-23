@@ -229,14 +229,14 @@ def main():
         explanations = []
         for idx, (text, record) in enumerate(zip(selected_texts, selected_records)):
             print(f"[shap] Hybrid text-branch SHAP {idx + 1}/{len(selected_records)}: {record.get('function_name', '')}")
-            predict_label_logit, predict_probability = build_hybrid_text_predict_fn(
+            _, predict_probability = build_hybrid_text_predict_fn(
                 model,
                 record,
                 label_index,
             )
 
             sample_explanations = explain_text_model_label(
-                predict_label_proba=predict_label_logit,
+                predict_label_proba=predict_probability,
                 tokenizer=model.tokenizer,
                 texts=[text],
                 records=[record],

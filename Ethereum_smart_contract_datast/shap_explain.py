@@ -74,48 +74,52 @@ def _clean_token(token: str) -> str:
 
     return token
 
-
-
 # Tokens that are not useful for thesis interpretation.
 # They are ignored only in visualization.
 _DISPLAY_IGNORE = {
 
-    # variable names
+    "_",
+    "__",
+
     "a",
     "b",
     "c",
     "i",
     "j",
 
-    # Solidity primitive fragments
-    "uint",
-    "uint256",
-    "bytes",
-    "bytes32",
-
-    # numbers
     "0",
     "1",
     "2",
     "32",
+    "64",
+    "128",
     "256",
 
-    # punctuation
-    "_",
+    "[_",
+    "(_",
+    "]",
+    "[",
+    "(",
+    ")",
+    "{",
+    "}",
 
-    # CodeBERT artifacts
-    "<s>",
-    "</s>",
-    "<pad>",
+    "ID",
+    "Name",
+    "Names",
+
+    "true",
+    "false",
+
+    "external",
+    "public",
+    "private",
+    "internal",
 }
-
-
 
 _PUNCT_ONLY = set(
     "()[]{}.,;:+-*/%=<>!&|^~?@#\"'`\\ "
 )
-
-
 
 def _is_meaningful_token(token):
 
@@ -158,26 +162,26 @@ def _is_meaningful_token(token):
 
 
 def merge_bpe_tokens(tokens):
-
     merged = []
+    current = ""
 
     for token in tokens:
 
-        token = (
-            token
-            .replace("Ġ", "")
-            .replace("Ċ", "")
-        )
-
-        if token in [
-            "<s>",
-            "</s>",
-            "<pad>"
-        ]:
+        if token in ("<s>", "</s>", "<pad>"):
             continue
 
-        if token:
-            merged.append(token)
+        token = token.replace("Ċ", "")
+
+        if token.startswith("Ġ"):
+            if current:
+                merged.append(current)
+            current = token[1:]
+
+        else:
+            current += token
+
+    if current:
+        merged.append(current)
 
     return merged
 
@@ -359,59 +363,41 @@ def _split_attributions(
 # ============================================================
 
 
-def _global_token_importance(
-    samples,
-    limit=25
-):
+def _global_token_importance(samples, limit=20):
 
-    scores={}
-    counts={}
+    scores = {}
+    counts = {}
 
     for sample in samples:
 
-        if sample.explanation_type != "text_tokens":
-            continue
-
-        seen=set()
-
         for item in sample.attributions:
 
-            token=item.token
+            token = item.token
 
-            scores[token]=(
-                scores.get(token,0)
-                +
-                abs(item.shap_value)
-            )
+            if token in _DISPLAY_IGNORE:
+                continue
 
-            if token not in seen:
-                counts[token]=(
-                    counts.get(token,0)+1
-                )
+            scores[token] = scores.get(token, 0) + abs(item.shap_value)
+            counts[token] = counts.get(token, 0) + 1
 
-                seen.add(token)
-
-    ranked=sorted(
+    ranked = sorted(
         scores.items(),
-        key=lambda x:x[1],
-        reverse=True
-    )[:limit]
+        key=lambda x: x[1] / counts[x[0]],
+        reverse=True,
+    )
 
-    return [
-        {
-            "token":token,
-            "mean_abs_shap":
-                float(
-                    scores[token]
-                    /
-                    counts[token]
-                ),
-            "count":
-                counts[token]
-        }
+    output = []
 
-        for token,_ in ranked
-    ]
+    for token, score in ranked[:limit]:
+
+        output.append({
+            "token": token,
+            "mean_abs_shap": score / counts[token],
+            "count": counts[token],
+        })
+
+    return output
+
 
 # ============================================================
 # TEXT MODEL SHAP EXPLANATION
